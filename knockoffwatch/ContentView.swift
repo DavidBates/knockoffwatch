@@ -16,15 +16,15 @@ struct ContentView: View {
                 }
                 if case .connected = bluetooth.connectionState {
                     batterySection
-                    debugSection
                 }
+                BLEDebugSection(bluetooth: bluetooth)
             }
             .navigationTitle("LaxasFit Watch")
             .listStyle(.insetGrouped)
         }
     }
 
-    // MARK: - Sections
+    // MARK: - Main sections
 
     private var bluetoothStatusSection: some View {
         Section("Bluetooth") {
@@ -60,9 +60,15 @@ struct ContentView: View {
     }
 
     private var peripheralsSection: some View {
-        Section("Nearby Devices (\(bluetooth.peripherals.count))") {
+        let isConnectable: Bool = {
+            switch bluetooth.connectionState {
+            case .disconnected, .failed: return true
+            default: return false
+            }
+        }()
+        return Section("Nearby Devices (\(bluetooth.peripherals.count))") {
             ForEach(bluetooth.peripherals) { entry in
-                PeripheralRow(entry: entry) {
+                PeripheralRow(entry: entry, isConnectable: isConnectable) {
                     bluetooth.connect(to: entry)
                 }
             }
@@ -77,8 +83,7 @@ struct ContentView: View {
                         .font(.title2)
                         .foregroundStyle(batteryColor(level))
                     VStack(alignment: .leading) {
-                        Text("\(level)%")
-                            .font(.title.bold())
+                        Text("\(level)%").font(.title.bold())
                         Text("LaxasFit Watch Ultra")
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -89,25 +94,6 @@ struct ContentView: View {
                 HStack {
                     ProgressView().scaleEffect(0.8)
                     Text("Reading battery level…").foregroundStyle(.secondary)
-                }
-            }
-        }
-    }
-
-    private var debugSection: some View {
-        Section {
-            DisclosureGroup("Debug: Services & Characteristics") {
-                if bluetooth.discoveredServices.isEmpty {
-                    Text("Discovering…")
-                        .foregroundStyle(.secondary)
-                        .font(.caption)
-                } else {
-                    ForEach(bluetooth.discoveredServices, id: \.uuid) { service in
-                        ServiceRow(
-                            service: service,
-                            allCharacteristics: bluetooth.discoveredCharacteristics
-                        )
-                    }
                 }
             }
         }
@@ -130,7 +116,7 @@ struct ContentView: View {
 
     private func batteryIcon(_ level: Int) -> String {
         switch level {
-        case 88...: return "battery.100"
+        case 88...:   return "battery.100"
         case 63...87: return "battery.75"
         case 38...62: return "battery.50"
         case 13...37: return "battery.25"
@@ -138,8 +124,102 @@ struct ContentView: View {
         }
     }
 
-    private func batteryColor(_ level: Int) -> Color {
-        level > 20 ? .green : .red
+    private func batteryColor(_ level: Int) -> Color { level > 20 ? .green : .red }
+}
+
+// MARK: - BLEDebugSection
+
+struct BLEDebugSection: View {
+    @Bindable var bluetooth: BluetoothManager
+
+    var body: some View {
+        Section {
+            DisclosureGroup("BLE Debug") {
+                sessionStatsRows
+                keepAliveRows
+                if !bluetooth.discoveredServices.isEmpty {
+                    servicesDisclosureGroup
+                }
+                eventLogDisclosureGroup
+            }
+        }
+    }
+
+    @ViewBuilder private var sessionStatsRows: some View {
+        LabeledContent("Services found",
+                       value: "\(bluetooth.discoveredServices.count)")
+        LabeledContent("Characteristics found",
+                       value: "\(bluetooth.discoveredCharacteristics.count)")
+        if let d = bluetooth.lastDisconnectDuration {
+            LabeledContent("Last session", value: formatDuration(d))
+        }
+        if let r = bluetooth.lastDisconnectReason {
+            LabeledContent("Disconnect reason") {
+                Text(r)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .multilineTextAlignment(.trailing)
+            }
+        }
+    }
+
+    @ViewBuilder private var keepAliveRows: some View {
+        Toggle(
+            "Keep connection active",
+            isOn: Binding(
+                get: { bluetooth.keepAliveEnabled },
+                set: { bluetooth.setKeepAlive($0) }
+            )
+        )
+        if bluetooth.isKeepAliveRunning {
+            HStack(spacing: 6) {
+                ProgressView().scaleEffect(0.75)
+                Text("Keep-alive running (reads every 2s, up to 30s)…")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private var servicesDisclosureGroup: some View {
+        DisclosureGroup("Services & Characteristics (\(bluetooth.discoveredServices.count))") {
+            ForEach(bluetooth.discoveredServices, id: \.uuid) { service in
+                ServiceRow(
+                    service: service,
+                    allCharacteristics: bluetooth.discoveredCharacteristics
+                )
+            }
+        }
+    }
+
+    private var eventLogDisclosureGroup: some View {
+        DisclosureGroup("Event Log (\(bluetooth.eventLog.count))") {
+            if bluetooth.eventLog.isEmpty {
+                Text("No events yet.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                // Newest first; show last 30 to keep the list manageable
+                ForEach(bluetooth.eventLog.suffix(30).reversed()) { event in
+                    HStack(alignment: .top, spacing: 6) {
+                        Text(event.timeString)
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .fixedSize()
+                        Text(event.message)
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(.primary)
+                    }
+                    .padding(.vertical, 1)
+                }
+            }
+        }
+    }
+
+    private func formatDuration(_ t: TimeInterval) -> String {
+        t < 60
+            ? String(format: "%.1fs", t)
+            : "\(Int(t) / 60)m \(Int(t) % 60)s"
     }
 }
 
@@ -147,6 +227,7 @@ struct ContentView: View {
 
 struct PeripheralRow: View {
     let entry: DiscoveredPeripheral
+    let isConnectable: Bool
     let onConnect: () -> Void
 
     var body: some View {
@@ -170,6 +251,7 @@ struct PeripheralRow: View {
                 Button("Connect", action: onConnect)
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
+                    .disabled(!isConnectable)
             }
         }
         .padding(.vertical, 2)
@@ -206,10 +288,10 @@ struct ServiceRow: View {
 
     private func propertiesLabel(_ props: CBCharacteristicProperties) -> String {
         var parts: [String] = []
-        if props.contains(.read)   { parts.append("R") }
-        if props.contains(.write)  { parts.append("W") }
-        if props.contains(.notify) { parts.append("N") }
-        if props.contains(.indicate) { parts.append("I") }
+        if props.contains(.read)    { parts.append("R") }
+        if props.contains(.write)   { parts.append("W") }
+        if props.contains(.notify)  { parts.append("N") }
+        if props.contains(.indicate){ parts.append("I") }
         return parts.isEmpty ? "—" : parts.joined(separator: "|")
     }
 }
