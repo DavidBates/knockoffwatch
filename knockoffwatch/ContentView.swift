@@ -307,6 +307,23 @@ struct ContentView: View {
                         .foregroundStyle(.purple)
                 }
             }
+            NavigationLink {
+                KeepAliveTestView(bluetooth: bluetooth)
+            } label: {
+                Label {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Keep Alive Test")
+                        Text(bluetooth.isKeepAliveRunning
+                             ? "Running [\(bluetooth.keepAliveMode.label)]"
+                             : "Mode: \(bluetooth.keepAliveMode.label)")
+                            .font(.caption)
+                            .foregroundStyle(bluetooth.isKeepAliveRunning ? .green : .secondary)
+                    }
+                } icon: {
+                    Image(systemName: "bolt.heart")
+                        .foregroundStyle(.green)
+                }
+            }
         }
     }
 
@@ -366,12 +383,15 @@ struct BLEDebugSection: View {
     }
 
     @ViewBuilder private var keepAliveRows: some View {
-        Toggle(
-            "Keep connection active",
-            isOn: Binding(get: { bluetooth.keepAliveEnabled },
-                          set: { bluetooth.setKeepAlive($0) })
-        )
-        if bluetooth.keepAliveEnabled {
+        Picker("Keep-Alive", selection: Binding(
+            get: { bluetooth.keepAliveMode },
+            set: { bluetooth.setKeepAliveMode($0) }
+        )) {
+            Text("None").tag(KeepAliveMode.none)
+            Text("Battery").tag(KeepAliveMode.batteryRead)
+            Text("UART Ping").tag(KeepAliveMode.uartPing)
+        }
+        if bluetooth.keepAliveMode != .none {
             Stepper(
                 "Interval: \(Int(bluetooth.keepAliveIntervalSeconds))s",
                 value: Binding(get: { bluetooth.keepAliveIntervalSeconds },
@@ -383,7 +403,7 @@ struct BLEDebugSection: View {
         if bluetooth.isKeepAliveRunning {
             HStack(spacing: 6) {
                 ProgressView().scaleEffect(0.75)
-                Text("Running — battery read every \(Int(bluetooth.keepAliveIntervalSeconds))s")
+                Text("Running [\(bluetooth.keepAliveMode.label)] every \(Int(bluetooth.keepAliveIntervalSeconds))s")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

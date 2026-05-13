@@ -101,6 +101,20 @@ struct DiscoveredPeripheral: Identifiable {
     var advertisementSummary: String
 }
 
+enum KeepAliveMode: Equatable {
+    case none
+    case batteryRead
+    case uartPing
+
+    var label: String {
+        switch self {
+        case .none:        return "none"
+        case .batteryRead: return "batteryRead"
+        case .uartPing:    return "uartPing"
+        }
+    }
+}
+
 // Lifecycle of an active heart rate measurement triggered by the app.
 enum HRMeasurementState: Equatable {
     case idle                // no measurement running
@@ -170,8 +184,9 @@ final class BluetoothManager: NSObject {
     // Connected watch identity — persisted across disconnects, cleared on new scan
     private(set) var connectedDeviceName: String? = nil
 
-    var keepAliveEnabled = false
+    private(set) var keepAliveMode: KeepAliveMode = .none
     var keepAliveIntervalSeconds: Double = 5.0
+    var customKeepAliveHex: String = ""
     var isRecordingInteraction = false
 
     // MARK: Private
@@ -255,9 +270,9 @@ final class BluetoothManager: NSObject {
         central.cancelPeripheralConnection(p)
     }
 
-    func setKeepAlive(_ enabled: Bool) {
-        keepAliveEnabled = enabled
-        if enabled { startKeepAlive() } else { stopKeepAlive() }
+    func setKeepAliveMode(_ mode: KeepAliveMode) {
+        keepAliveMode = mode
+        if mode == .none { stopKeepAlive() } else { startKeepAlive() }
     }
 
     func refreshBattery() {
@@ -277,7 +292,7 @@ final class BluetoothManager: NSObject {
             logEvent("HR measurement: cannot start — not connected or write char unavailable")
             return
         }
-        if !keepAliveEnabled { setKeepAlive(true) }
+        if keepAliveMode == .none { setKeepAliveMode(.batteryRead) }
         if let notifyChar = heartRateNotifyChar, !notifyChar.isNotifying {
             peripheral.setNotifyValue(true, for: notifyChar)
         }
@@ -620,34 +635,60 @@ final class BluetoothManager: NSObject {
     }
 
     private func startKeepAlive() {
-        guard keepAliveEnabled,
-              case .connected = connectionState,
-              let peripheral = connectedPeripheral,
-              let char = batteryLevelChar else { return }
+        guard keepAliveMode != .none, case .connected = connectionState else { return }
         stopKeepAlive()
         isKeepAliveRunning = true
-        logEvent("Keep-alive: starting — battery read every \(Int(keepAliveIntervalSeconds))s")
+        logEvent("Keep-alive: starting [\(keepAliveMode.label)] every \(Int(keepAliveIntervalSeconds))s")
 
         keepAliveTask = Task { @MainActor [weak self] in
             var count = 0
             while !Task.isCancelled {
-                guard self?.keepAliveEnabled == true,
+                guard self?.keepAliveMode != .none,
                       case .connected? = self?.connectionState else { break }
                 let interval = self?.keepAliveIntervalSeconds ?? 5.0
                 try? await Task.sleep(for: .seconds(interval))
                 if Task.isCancelled { break }
-                guard self?.keepAliveEnabled == true,
+                guard self?.keepAliveMode != .none,
                       case .connected? = self?.connectionState else {
                     self?.logEvent("Keep-alive: stopping (disconnected or disabled)")
                     break
                 }
                 count += 1
-                self?.logEvent("Keep-alive: battery read #\(count)")
-                peripheral.readValue(for: char)
+                self?.performKeepAliveTick(count: count)
             }
             self?.isKeepAliveRunning = false
             if let s = self, !Task.isCancelled {
-                s.logEvent("Keep-alive: stopped after \(count) reads")
+                s.logEvent("Keep-alive: stopped after \(count) ticks")
+            }
+        }
+    }
+
+    private func performKeepAliveTick(count: Int) {
+        switch keepAliveMode {
+        case .none:
+            break
+        case .batteryRead:
+            guard let peripheral = connectedPeripheral, let char = batteryLevelChar else {
+                logEvent("Keep-alive [batteryRead] #\(count): battery char unavailable")
+                return
+            }
+            logEvent("Keep-alive [batteryRead] #\(count): reading battery")
+            peripheral.readValue(for: char)
+        case .uartPing:
+            guard let peripheral = connectedPeripheral, let writeChar = hrWriteChar else {
+                logEvent("Keep-alive [uartPing] #\(count): write char unavailable")
+                return
+            }
+            if measurementState.isActive {
+                let hex = CharacteristicInfo.toHex(Self.hrStartCommand)
+                peripheral.writeValue(Self.hrStartCommand, for: writeChar, type: .withoutResponse)
+                logEvent("Keep-alive [uartPing] #\(count): sent HR ping [\(hex)] (measurement active)")
+            } else if !customKeepAliveHex.isEmpty, let data = BluetoothManager.parseHex(customKeepAliveHex) {
+                let hex = CharacteristicInfo.toHex(data)
+                peripheral.writeValue(data, for: writeChar, type: .withoutResponse)
+                logEvent("Keep-alive [uartPing] #\(count): sent custom ping [\(hex)]")
+            } else {
+                logEvent("Keep-alive [uartPing] #\(count): idle — no command configured")
             }
         }
     }
