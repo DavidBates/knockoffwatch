@@ -115,6 +115,25 @@ enum KeepAliveMode: Equatable {
     }
 }
 
+enum AutoHRInterval: Int, CaseIterable, Identifiable {
+    case oneMinute      = 60
+    case fiveMinutes    = 300
+    case fifteenMinutes = 900
+    case thirtyMinutes  = 1800
+
+    var id: Int { rawValue }
+    var seconds: TimeInterval { TimeInterval(rawValue) }
+
+    var label: String {
+        switch self {
+        case .oneMinute:      return "1 minute"
+        case .fiveMinutes:    return "5 minutes"
+        case .fifteenMinutes: return "15 minutes"
+        case .thirtyMinutes:  return "30 minutes"
+        }
+    }
+}
+
 // Lifecycle of an active heart rate measurement triggered by the app.
 enum HRMeasurementState: Equatable {
     case idle                // no measurement running
@@ -184,6 +203,15 @@ final class BluetoothManager: NSObject {
     // Connected watch identity — persisted across disconnects, cleared on new scan
     private(set) var connectedDeviceName: String? = nil
 
+    // Auto-connect
+    private(set) var isAutoConnecting: Bool = false
+    private(set) var savedWatchName: String? = nil
+
+    // Scheduled HR checks
+    private(set) var autoHREnabled: Bool = false
+    private(set) var autoHRInterval: AutoHRInterval = .fiveMinutes
+    private(set) var nextScheduledCheck: Date? = nil
+
     private(set) var keepAliveMode: KeepAliveMode = .none
     var keepAliveIntervalSeconds: Double = 5.0
     var customKeepAliveHex: String = ""
@@ -200,6 +228,7 @@ final class BluetoothManager: NSObject {
     private var connectedAt: Date?
     private var keepAliveTask: Task<Void, Never>?
     private var measurementTask: Task<Void, Never>?
+    private var schedulerTask: Task<Void, Never>?
     private var sessionStartTime: Date?
     private var lastWriteByPair: [String: (time: Date, hex: String)] = [:]
 
@@ -211,11 +240,20 @@ final class BluetoothManager: NSObject {
     private static let hrStopCommand  = Data([0xDF, 0x00, 0x06, 0xF6, 0x02, 0x01, 0x0D, 0x00, 0x01, 0x00])
     private static let hrCommandAck   = Data([0xFD, 0x00, 0x05, 0x1C, 0x02, 0x0D, 0x00, 0x0A, 0x01])
 
+    private static let savedWatchUUIDKey = "knockoff.savedWatchUUID"
+    private static let savedWatchNameKey = "knockoff.savedWatchName"
+    private static let autoHREnabledKey  = "knockoff.autoHREnabled"
+    private static let autoHRIntervalKey = "knockoff.autoHRInterval"
+
     var isScanning: Bool { central?.isScanning ?? false }
 
     override init() {
         super.init()
         central = CBCentralManager(delegate: self, queue: .main)
+        autoHREnabled = UserDefaults.standard.bool(forKey: Self.autoHREnabledKey)
+        let rawInterval = UserDefaults.standard.integer(forKey: Self.autoHRIntervalKey)
+        autoHRInterval = AutoHRInterval(rawValue: rawInterval) ?? .fiveMinutes
+        savedWatchName = UserDefaults.standard.string(forKey: Self.savedWatchNameKey)
     }
 
     // MARK: - Public API
@@ -233,6 +271,7 @@ final class BluetoothManager: NSObject {
         resetChannelPairs()
         protocolSessionLog.removeAll()
         lastWriteByPair.removeAll()
+        isAutoConnecting = false
         logEvent("--- Scan started ---")
         statusMessage = "Scanning..."
         central.scanForPeripherals(withServices: nil,
@@ -273,6 +312,36 @@ final class BluetoothManager: NSObject {
     func setKeepAliveMode(_ mode: KeepAliveMode) {
         keepAliveMode = mode
         if mode == .none { stopKeepAlive() } else { startKeepAlive() }
+    }
+
+    func cancelAutoConnect() {
+        isAutoConnecting = false
+        if central.isScanning { central.stopScan() }
+        statusMessage = "Auto-connect cancelled."
+        logEvent("Auto-connect: cancelled by user")
+    }
+
+    func forgetWatch() {
+        isAutoConnecting = false
+        if central.isScanning { central.stopScan() }
+        UserDefaults.standard.removeObject(forKey: Self.savedWatchUUIDKey)
+        UserDefaults.standard.removeObject(forKey: Self.savedWatchNameKey)
+        savedWatchName = nil
+        stopScheduler()
+        statusMessage = "Watch forgotten. Tap Scan to find a new device."
+        logEvent("Saved watch forgotten")
+    }
+
+    func setAutoHREnabled(_ enabled: Bool) {
+        autoHREnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: Self.autoHREnabledKey)
+        if enabled, case .connected = connectionState { startScheduler() } else { stopScheduler() }
+    }
+
+    func setAutoHRInterval(_ interval: AutoHRInterval) {
+        autoHRInterval = interval
+        UserDefaults.standard.set(interval.rawValue, forKey: Self.autoHRIntervalKey)
+        if autoHREnabled, case .connected = connectionState { startScheduler() }
     }
 
     func refreshBattery() {
@@ -553,6 +622,10 @@ final class BluetoothManager: NSObject {
                 measurementTask?.cancel()
                 measurementTask = nil
                 logEvent("HR measurement: complete — BPM \(bpm)")
+                if let peripheral = connectedPeripheral, let writeChar = hrWriteChar {
+                    peripheral.writeValue(Self.hrStopCommand, for: writeChar, type: .withoutResponse)
+                    logEvent("HR measurement: stop command sent after result")
+                }
             }
 
         case .liveSensorOrStatus:
@@ -700,6 +773,119 @@ final class BluetoothManager: NSObject {
         isKeepAliveRunning = false
         logEvent("Keep-alive: stopped")
     }
+
+    // MARK: - Auto-connect
+
+    private var savedWatchUUID: UUID? {
+        UserDefaults.standard.string(forKey: Self.savedWatchUUIDKey)
+            .flatMap { UUID(uuidString: $0) }
+    }
+
+    private func attemptAutoConnect() {
+        guard let savedUUID = savedWatchUUID else {
+            statusMessage = "Bluetooth ready. Tap Scan."
+            return
+        }
+        isAutoConnecting = true
+        statusMessage = "Auto-connecting\(savedWatchName.map { " to \($0)" } ?? "")…"
+        logEvent("Auto-connect: looking for saved peripheral")
+        let found = central.retrievePeripherals(withIdentifiers: [savedUUID])
+        if let peripheral = found.first {
+            logEvent("Auto-connect: retrieved from cache, connecting")
+            autoConnectTo(peripheral)
+        } else {
+            logEvent("Auto-connect: not cached, starting scan")
+            startAutoConnectScan()
+        }
+    }
+
+    private func autoConnectTo(_ peripheral: CBPeripheral) {
+        connectedPeripheral = peripheral
+        batteryLevelChar = nil
+        heartRateNotifyChar = nil
+        hrWriteChar = nil
+        isHRWriteCharAvailable = false
+        peripheral.delegate = self
+        connectionState = .connecting
+        connectAttemptTime = Date()
+        logEvent("Auto-connect: connecting to \(peripheral.name ?? peripheral.identifier.uuidString.prefix(8).description)")
+        central.connect(peripheral, options: nil)
+    }
+
+    private func startAutoConnectScan() {
+        central.scanForPeripherals(withServices: nil,
+                                   options: [CBCentralManagerScanOptionAllowDuplicatesKey: false])
+    }
+
+    // MARK: - Scheduler
+
+    private func startScheduler() {
+        guard autoHREnabled else { return }
+        stopScheduler()
+        logEvent("Auto HR: scheduler started — \(autoHRInterval.label) interval")
+
+        schedulerTask = Task { @MainActor [weak self] in
+            var count = 0
+            while !Task.isCancelled {
+                guard let this = self, this.autoHREnabled else { break }
+                let interval = this.autoHRInterval.seconds
+                let next = Date().addingTimeInterval(interval)
+                this.nextScheduledCheck = next
+                this.logEvent("Auto HR: next check in \(this.autoHRInterval.label)")
+
+                try? await Task.sleep(for: .seconds(interval))
+                if Task.isCancelled { break }
+
+                guard this.autoHREnabled, !Task.isCancelled else { break }
+                count += 1
+                this.nextScheduledCheck = nil
+                this.logEvent("Auto HR: running scheduled check #\(count)")
+                await this.runScheduledHRCheck()
+            }
+            self?.nextScheduledCheck = nil
+        }
+    }
+
+    private func stopScheduler() {
+        guard schedulerTask != nil else { return }
+        schedulerTask?.cancel()
+        schedulerTask = nil
+        nextScheduledCheck = nil
+        logEvent("Auto HR: scheduler stopped")
+    }
+
+    private func runScheduledHRCheck() async {
+        guard case .connected = connectionState else {
+            logEvent("Auto HR: skipped — not connected")
+            return
+        }
+        guard !measurementState.isActive else {
+            logEvent("Auto HR: skipped — measurement already running")
+            return
+        }
+        logEvent("Auto HR: starting check")
+        startHeartRateMeasurement()
+
+        let deadline = Date().addingTimeInterval(45)
+        while Date() < deadline, !Task.isCancelled {
+            switch measurementState {
+            case .complete:
+                logEvent("Auto HR: check complete — \(lastHeartRate.map { "\($0) bpm" } ?? "?")")
+                return
+            case .timeout:
+                logEvent("Auto HR: check ended by measurement timeout")
+                return
+            default:
+                break
+            }
+            try? await Task.sleep(for: .milliseconds(500))
+        }
+
+        if !Task.isCancelled {
+            logEvent("Auto HR: check timed out (45s deadline)")
+            stopHeartRateMeasurement()
+        }
+    }
 }
 
 // MARK: - CBCentralManagerDelegate
@@ -711,7 +897,8 @@ extension BluetoothManager: CBCentralManagerDelegate {
             guard let self else { return }
             centralState = state
             switch state {
-            case .poweredOn:    statusMessage = "Bluetooth ready. Tap Scan."
+            case .poweredOn:
+                attemptAutoConnect()
             case .poweredOff:   statusMessage = "Bluetooth is off."
             case .unauthorized: statusMessage = "Bluetooth permission denied."
             case .unsupported:  statusMessage = "Bluetooth not supported on this device."
@@ -747,6 +934,11 @@ extension BluetoothManager: CBCentralManagerDelegate {
                     return $0.name < $1.name
                 }
             }
+            if isAutoConnecting, let savedUUID = savedWatchUUID, id == savedUUID {
+                logEvent("Auto-connect: found target via scan")
+                central.stopScan()
+                autoConnectTo(peripheral)
+            }
         }
     }
 
@@ -760,6 +952,12 @@ extension BluetoothManager: CBCentralManagerDelegate {
             connectedDeviceName = peripheral.name
             connectionState = .connected
             measurementState = .idle
+            isAutoConnecting = false
+            UserDefaults.standard.set(peripheral.identifier.uuidString, forKey: Self.savedWatchUUIDKey)
+            if let name = peripheral.name {
+                UserDefaults.standard.set(name, forKey: Self.savedWatchNameKey)
+                savedWatchName = name
+            }
             discoveredServices.removeAll()
             discoveredCharacteristics.removeAll()
             characteristicInfos.removeAll()
@@ -772,6 +970,7 @@ extension BluetoothManager: CBCentralManagerDelegate {
                                 charUUID: peripheral.name ?? peripheral.identifier.uuidString,
                                 hexBytes: "", byteCount: 0)
             peripheral.discoverServices(nil)
+            if autoHREnabled { startScheduler() }
         }
     }
 
@@ -801,6 +1000,7 @@ extension BluetoothManager: CBCentralManagerDelegate {
         Task { @MainActor [weak self] in
             guard let self else { return }
             stopKeepAlive()
+            stopScheduler()
             measurementTask?.cancel()
             measurementTask = nil
             measurementState = .idle

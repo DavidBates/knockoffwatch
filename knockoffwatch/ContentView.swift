@@ -16,7 +16,7 @@ struct ContentView: View {
                 if bluetooth.centralState == .poweredOn {
                     scanControlSection
                 }
-                if !bluetooth.peripherals.isEmpty && !isConnected {
+                if !bluetooth.peripherals.isEmpty && !isConnected && !bluetooth.isAutoConnecting {
                     peripheralsSection
                 }
                 if let name = bluetooth.connectedDeviceName {
@@ -26,6 +26,7 @@ struct ContentView: View {
                     batterySection
                 }
                 heartRateSection
+                autoHRSection
                 toolsSection
                 BLEDebugSection(bluetooth: bluetooth)
             }
@@ -52,7 +53,20 @@ struct ContentView: View {
 
     private var scanControlSection: some View {
         Section {
-            if bluetooth.isScanning {
+            if bluetooth.isScanning && bluetooth.isAutoConnecting {
+                HStack {
+                    ProgressView().padding(.trailing, 4)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Auto-connecting…").foregroundStyle(.secondary)
+                        if let name = bluetooth.savedWatchName {
+                            Text("Looking for \(name)").font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                    Spacer()
+                    Button("Cancel", action: bluetooth.cancelAutoConnect)
+                        .buttonStyle(.bordered).controlSize(.small)
+                }
+            } else if bluetooth.isScanning {
                 HStack {
                     ProgressView().padding(.trailing, 4)
                     Button("Stop Scanning", action: bluetooth.stopScan)
@@ -60,13 +74,20 @@ struct ContentView: View {
                 }
             } else if case .connected = bluetooth.connectionState {
                 Button("Disconnect", role: .destructive, action: bluetooth.disconnect)
+                if bluetooth.savedWatchName != nil {
+                    Button("Forget Watch", role: .destructive, action: bluetooth.forgetWatch)
+                }
             } else if case .connecting = bluetooth.connectionState {
                 HStack {
                     ProgressView().padding(.trailing, 4)
-                    Text("Connecting…").foregroundStyle(.secondary)
+                    Text(bluetooth.isAutoConnecting ? "Auto-connecting…" : "Connecting…")
+                        .foregroundStyle(.secondary)
                 }
             } else {
                 Button("Scan for Devices", action: bluetooth.startScan)
+                if bluetooth.savedWatchName != nil {
+                    Button("Forget Watch", role: .destructive, action: bluetooth.forgetWatch)
+                }
             }
         }
     }
@@ -268,6 +289,60 @@ struct ContentView: View {
                 }
                 .disabled(!bluetooth.isHRWriteCharAvailable)
             }
+        }
+    }
+
+    // MARK: - Auto HR
+
+    private var autoHRSection: some View {
+        Section {
+            Toggle("Auto HR Checks", isOn: Binding(
+                get: { bluetooth.autoHREnabled },
+                set: { bluetooth.setAutoHREnabled($0) }
+            ))
+
+            if bluetooth.autoHREnabled {
+                Picker("Interval", selection: Binding(
+                    get: { bluetooth.autoHRInterval },
+                    set: { bluetooth.setAutoHRInterval($0) }
+                )) {
+                    ForEach(AutoHRInterval.allCases) { interval in
+                        Text(interval.label).tag(interval)
+                    }
+                }
+
+                if bluetooth.autoHRInterval == .oneMinute {
+                    HStack(alignment: .top, spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                            .padding(.top, 1)
+                        Text("One-minute checks may significantly reduce watch battery and may not work reliably in the background.")
+                            .font(.caption)
+                    }
+                }
+
+                if let next = bluetooth.nextScheduledCheck {
+                    HStack(spacing: 8) {
+                        Image(systemName: "clock").foregroundStyle(.secondary)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text("Next check")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                            HStack(spacing: 3) {
+                                Text(next, style: .relative)
+                                Text("from now")
+                            }
+                            .font(.caption)
+                        }
+                    }
+                }
+            }
+
+            Text("Automatic checks run reliably while the app is open. iOS may limit checks when the app is in the background.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        } header: {
+            Text("Heart Rate Schedule")
         }
     }
 
