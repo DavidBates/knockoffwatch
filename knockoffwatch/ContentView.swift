@@ -30,6 +30,7 @@ struct ContentView: View {
                 bloodPressureSection
                 bloodOxygenSection
                 autoHRSection
+                healthSection
                 toolsSection
                 BLEDebugSection(bluetooth: bluetooth)
             }
@@ -552,6 +553,68 @@ struct ContentView: View {
                 .foregroundStyle(.secondary)
         } header: {
             Text("Heart Rate Schedule")
+        }
+    }
+
+    // MARK: - Apple Health
+
+    private var healthSection: some View {
+        let hk = bluetooth.healthKit
+        return Section {
+            HStack(spacing: 10) {
+                Circle()
+                    .fill(healthStatusColor(hk.authorizationStatus))
+                    .frame(width: 10, height: 10)
+                Text(hk.authorizationStatus.label)
+                    .font(.subheadline)
+            }
+
+            if hk.isAvailable && hk.authorizationStatus != .authorized {
+                Button("Connect Apple Health") {
+                    Task { await hk.requestAuthorization() }
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .tint(.pink)
+            }
+
+            if hk.authorizationStatus == .authorized {
+                Toggle("Save Heart Rate", isOn: Binding(
+                    get: { hk.saveHR },
+                    set: { hk.setSaveHR($0) }
+                ))
+                Toggle("Save Blood Oxygen (SpO2)", isOn: Binding(
+                    get: { hk.saveSpO2 },
+                    set: { hk.setSaveSpO2($0) }
+                ))
+            }
+
+            if let result = hk.lastSaveResult {
+                Label(result, systemImage: "checkmark.circle")
+                    .font(.caption)
+                    .foregroundStyle(.green)
+            }
+
+            if let err = hk.lastSaveError {
+                Label(err, systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+
+            Text("These readings come from an unsupported third-party watch integration and should not be used for medical decisions.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        } header: {
+            Text("Apple Health")
+        }
+    }
+
+    private func healthStatusColor(_ status: HealthKitManager.AuthStatus) -> Color {
+        switch status {
+        case .authorized:    return .green
+        case .denied:        return .red
+        case .notDetermined: return .gray
+        case .unavailable:   return .gray
         }
     }
 

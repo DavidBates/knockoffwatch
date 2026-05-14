@@ -203,6 +203,8 @@ final class BluetoothManager: NSObject {
 
     // MARK: Observable state
 
+    let healthKit = HealthKitManager()
+
     private(set) var centralState: CBManagerState = .unknown
     private(set) var peripherals: [DiscoveredPeripheral] = []
     private(set) var connectionState: ConnectionState = .disconnected
@@ -796,7 +798,8 @@ final class BluetoothManager: NSObject {
             lastHRPacketTypeDesc = "0x04 = HR result"
             let isFirst = lastHeartRate == nil
             lastHeartRate = bpm
-            lastHeartRateDate = Date()
+            let hrDate = Date()
+            lastHeartRateDate = hrDate
             lastHeartRatePacket = hex
             logEvent("Heart rate: \(bpm) bpm [type=0x04]\(isFirst ? " — first result" : "") [\(hex)]")
             if measurementState.isActive {
@@ -809,6 +812,8 @@ final class BluetoothManager: NSObject {
                     logEvent("HR measurement: stop command sent after result")
                 }
             }
+            let hk = healthKit
+            Task { await hk.saveHeartRate(bpm: bpm, date: hrDate, rawPacketHex: hex) }
 
         case .hrLiveSensorOrStatus:
             lastHRPacketTypeDesc = "0x0C = live sensor/status, ignored for dashboard"
@@ -852,7 +857,8 @@ final class BluetoothManager: NSObject {
         case .spo2Result(let pct):
             lastHRPacketTypeDesc = "0x0E = SpO2 result"
             lastSpO2 = pct
-            lastSpO2Date = Date()
+            let spo2Date = Date()
+            lastSpO2Date = spo2Date
             lastSpO2RawPacket = hex
             logEvent("SpO2: \(pct)% [type=0x0E] [\(hex)]")
             if spo2MeasurementState.isActive {
@@ -865,6 +871,8 @@ final class BluetoothManager: NSObject {
                 peripheral.writeValue(Self.spo2AckResult, for: writeChar, type: .withoutResponse)
                 logEvent("SpO2 result ACK sent")
             }
+            let hk = healthKit
+            Task { await hk.saveSpO2(percentage: pct, date: spo2Date, rawPacketHex: hex) }
 
         case .invalidSpO2Result(let pct):
             lastHRPacketTypeDesc = "0x0E = SpO2 result (invalid: \(pct)%)"
