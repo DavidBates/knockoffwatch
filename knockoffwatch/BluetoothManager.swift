@@ -152,11 +152,47 @@ enum HRMeasurementState: Equatable {
     }
 }
 
-// Classification of a received DF 00 11 packet based on byte[6].
-private enum HRPacketKind {
-    case heartRateResult(bpm: Int)           // byte[6] == 0x04, final byte is valid BPM
-    case invalidHeartRateResult(bpm: Int)    // byte[6] == 0x04, final byte outside 30–220
-    case liveSensorOrStatus                  // byte[6] == 0x0C — sensor data, not a BPM result
+enum BPMeasurementState: Equatable {
+    case idle
+    case starting
+    case measuring
+    case complete
+    case timeout
+
+    var isActive: Bool {
+        switch self {
+        case .starting, .measuring: return true
+        default: return false
+        }
+    }
+}
+
+struct BPLivePoint: Identifiable {
+    let id = UUID()
+    let index: Int
+    let rawValue: UInt8
+}
+
+enum SpO2MeasurementState: Equatable {
+    case idle, starting, measuring, complete, timeout
+
+    var isActive: Bool {
+        switch self {
+        case .starting, .measuring: return true
+        default: return false
+        }
+    }
+}
+
+// Classification of a received DF 00 11 UART notification by byte[6].
+private enum UARTPacketKind {
+    case heartRateResult(bpm: Int)
+    case invalidHeartRateResult(bpm: Int)
+    case hrLiveSensorOrStatus
+    case bpResult(systolic: Int, diastolic: Int)
+    case bpLiveData
+    case spo2Result(percentage: Int)
+    case invalidSpO2Result(percentage: Int)
     case unknownHealthPacket(typeByte: UInt8?)
 }
 
@@ -196,6 +232,20 @@ final class BluetoothManager: NSObject {
     private(set) var lastHRRawPacket: String? = nil     // hex of most recent HR packet (any type)
     private(set) var lastHRPacketTypeDesc: String? = nil // e.g. "0x04 = HR result"
 
+    // Blood pressure state — resets on disconnect
+    private(set) var lastSystolic: Int? = nil
+    private(set) var lastDiastolic: Int? = nil
+    private(set) var lastBPDate: Date? = nil
+    private(set) var lastBPRawPacket: String? = nil
+    private(set) var bpMeasurementState: BPMeasurementState = .idle
+    private(set) var bpLivePoints: [BPLivePoint] = []
+
+    // Blood oxygen state — resets on disconnect
+    private(set) var lastSpO2: Int? = nil
+    private(set) var lastSpO2Date: Date? = nil
+    private(set) var lastSpO2RawPacket: String? = nil
+    private(set) var spo2MeasurementState: SpO2MeasurementState = .idle
+
     // Active measurement state — resets on disconnect
     private(set) var measurementState: HRMeasurementState = .idle
     private(set) var isHRWriteCharAvailable = false
@@ -228,6 +278,8 @@ final class BluetoothManager: NSObject {
     private var connectedAt: Date?
     private var keepAliveTask: Task<Void, Never>?
     private var measurementTask: Task<Void, Never>?
+    private var bpMeasurementTask: Task<Void, Never>?
+    private var spo2MeasurementTask: Task<Void, Never>?
     private var schedulerTask: Task<Void, Never>?
     private var sessionStartTime: Date?
     private var lastWriteByPair: [String: (time: Date, hex: String)] = [:]
@@ -239,6 +291,17 @@ final class BluetoothManager: NSObject {
     private static let hrStartCommand = Data([0xDF, 0x00, 0x06, 0xF7, 0x02, 0x01, 0x0D, 0x00, 0x01, 0x01])
     private static let hrStopCommand  = Data([0xDF, 0x00, 0x06, 0xF6, 0x02, 0x01, 0x0D, 0x00, 0x01, 0x00])
     private static let hrCommandAck   = Data([0xFD, 0x00, 0x05, 0x1C, 0x02, 0x0D, 0x00, 0x0A, 0x01])
+
+    private static let bpStartCommand = Data([0xDF, 0x00, 0x06, 0xF4, 0x02, 0x01, 0x0A, 0x00, 0x01, 0x01])
+    private static let bpStopCommand  = Data([0xDF, 0x00, 0x06, 0xFB, 0x13, 0x01, 0x01, 0x00, 0x01, 0x00])
+    private static let bpStartAck     = Data([0xFD, 0x00, 0x05, 0x19, 0x02, 0x0A, 0x00, 0x0A, 0x01])
+    private static let bpAckResult    = Data([0xFD, 0x00, 0x05, 0x22, 0x05, 0x05, 0x00, 0x15, 0x01])
+    private static let bpAckLiveData  = Data([0xFD, 0x00, 0x05, 0xD5, 0x05, 0x02, 0x00, 0xCB, 0x01])
+
+    private static let spo2StartCommand = Data([0xDF, 0x00, 0x06, 0x06, 0x02, 0x01, 0x1C, 0x00, 0x01, 0x01])
+    private static let spo2StopCommand  = Data([0xDF, 0x00, 0x06, 0x05, 0x02, 0x01, 0x1C, 0x00, 0x01, 0x00])
+    private static let spo2CmdAck       = Data([0xFD, 0x00, 0x05, 0x2B, 0x02, 0x1C, 0x00, 0x0A, 0x01])
+    private static let spo2AckResult    = Data([0xFD, 0x00, 0x05, 0x2B, 0x05, 0x0E, 0x00, 0x15, 0x01])
 
     private static let savedWatchUUIDKey = "knockoff.savedWatchUUID"
     private static let savedWatchNameKey = "knockoff.savedWatchName"
@@ -396,6 +459,95 @@ final class BluetoothManager: NSObject {
             }
             measurementState = .idle
             logEvent("HR measurement: stopped by user")
+        }
+    }
+
+    func startBPMeasurement() {
+        guard case .connected = connectionState,
+              let peripheral = connectedPeripheral,
+              let writeChar = hrWriteChar else {
+            logEvent("BP measurement: cannot start — not connected or write char unavailable")
+            return
+        }
+        if let notifyChar = heartRateNotifyChar, !notifyChar.isNotifying {
+            peripheral.setNotifyValue(true, for: notifyChar)
+        }
+        bpLivePoints.removeAll()
+        bpMeasurementState = .starting
+        let hex = CharacteristicInfo.toHex(Self.bpStartCommand)
+        peripheral.writeValue(Self.bpStartCommand, for: writeChar, type: .withoutResponse)
+        logEvent("BP measurement: start command sent [\(hex)]")
+        appendProtocolEvent(kind: .write, charUUID: writeChar.uuid.uuidString,
+                            hexBytes: hex, byteCount: Self.bpStartCommand.count,
+                            writeType: "withoutResponse")
+        bpMeasurementState = .measuring
+
+        bpMeasurementTask?.cancel()
+        bpMeasurementTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(45))
+            guard let self, !Task.isCancelled else { return }
+            if self.bpMeasurementState.isActive {
+                self.bpMeasurementState = .timeout
+                self.logEvent("BP measurement: timed out — no result packet in 45s")
+            }
+        }
+    }
+
+    func stopBPMeasurement() {
+        bpMeasurementTask?.cancel()
+        bpMeasurementTask = nil
+        if bpMeasurementState.isActive {
+            if let peripheral = connectedPeripheral, let writeChar = hrWriteChar {
+                let hex = CharacteristicInfo.toHex(Self.bpStopCommand)
+                peripheral.writeValue(Self.bpStopCommand, for: writeChar, type: .withoutResponse)
+                logEvent("BP measurement: stop command sent (experimental) [\(hex)]")
+            }
+            bpMeasurementState = .idle
+            logEvent("BP measurement: stopped by user")
+        }
+    }
+
+    func startSpO2Measurement() {
+        guard case .connected = connectionState,
+              let peripheral = connectedPeripheral,
+              let writeChar = hrWriteChar else {
+            logEvent("SpO2 measurement: cannot start — not connected or write char unavailable")
+            return
+        }
+        if let notifyChar = heartRateNotifyChar, !notifyChar.isNotifying {
+            peripheral.setNotifyValue(true, for: notifyChar)
+        }
+        spo2MeasurementState = .starting
+        let hex = CharacteristicInfo.toHex(Self.spo2StartCommand)
+        peripheral.writeValue(Self.spo2StartCommand, for: writeChar, type: .withoutResponse)
+        logEvent("SpO2 measurement: start command sent [\(hex)]")
+        appendProtocolEvent(kind: .write, charUUID: writeChar.uuid.uuidString,
+                            hexBytes: hex, byteCount: Self.spo2StartCommand.count,
+                            writeType: "withoutResponse")
+        spo2MeasurementState = .measuring
+
+        spo2MeasurementTask?.cancel()
+        spo2MeasurementTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(30))
+            guard let self, !Task.isCancelled else { return }
+            if self.spo2MeasurementState.isActive {
+                self.spo2MeasurementState = .timeout
+                self.logEvent("SpO2 measurement: timed out — no result packet in 30s")
+            }
+        }
+    }
+
+    func stopSpO2Measurement() {
+        spo2MeasurementTask?.cancel()
+        spo2MeasurementTask = nil
+        if spo2MeasurementState.isActive {
+            if let peripheral = connectedPeripheral, let writeChar = hrWriteChar {
+                let hex = CharacteristicInfo.toHex(Self.spo2StopCommand)
+                peripheral.writeValue(Self.spo2StopCommand, for: writeChar, type: .withoutResponse)
+                logEvent("SpO2 measurement: stop command sent [\(hex)]")
+            }
+            spo2MeasurementState = .idle
+            logEvent("SpO2 measurement: stopped by user")
         }
     }
 
@@ -577,8 +729,8 @@ final class BluetoothManager: NSObject {
         }
     }
 
-    // Classify a DF 00 11 packet by byte[6] (the packet-type discriminator).
-    private func classifyHRPacket(_ data: Data) -> HRPacketKind {
+    // Classify a DF 00 11 UART notification by byte[6] (the packet-type discriminator).
+    private func classifyUARTPacket(_ data: Data) -> UARTPacketKind {
         guard data.count == 21,
               data[0] == 0xDF, data[1] == 0x00, data[2] == 0x11,
               data[4] == 0x05, data[5] == 0x01 else {
@@ -591,23 +743,53 @@ final class BluetoothManager: NSObject {
                 ? .heartRateResult(bpm: bpm)
                 : .invalidHeartRateResult(bpm: bpm)
         case 0x0C:
-            return .liveSensorOrStatus
+            return .hrLiveSensorOrStatus
+        case 0x05:
+            return .bpResult(systolic: Int(data[19]), diastolic: Int(data[20]))
+        case 0x02:
+            return .bpLiveData
+        case 0x0E:
+            let pct = Int(data[20])
+            return (70...100).contains(pct)
+                ? .spo2Result(percentage: pct)
+                : .invalidSpO2Result(percentage: pct)
         default:
             return .unknownHealthPacket(typeByte: data[6])
         }
     }
 
-    private func decodeHeartRatePacket(_ data: Data) {
+    private func decodeUARTNotification(_ data: Data) {
         let hex = CharacteristicInfo.toHex(data)
         lastHRRawPacket = hex
 
-        if data == Self.hrCommandAck {
-            lastHRPacketTypeDesc = "command ACK"
-            logEvent("HR command acknowledged: \(hex)")
+        // FD-prefix packets are watch responses/ACKs — not health data.
+        if data.first == 0xFD {
+            if data == Self.hrCommandAck {
+                lastHRPacketTypeDesc = "HR command ACK"
+                logEvent("HR command acknowledged: \(hex)")
+            } else if data == Self.bpStartAck {
+                lastHRPacketTypeDesc = "BP command ACK"
+                logEvent("BP command acknowledged: \(hex)")
+            } else if data == Self.spo2CmdAck {
+                lastHRPacketTypeDesc = "SpO2 command ACK"
+                logEvent("SpO2 command acknowledged: \(hex)")
+            } else {
+                lastHRPacketTypeDesc = "watch response"
+                logEvent("Watch response (\(data.count)B): \(hex)")
+            }
             return
         }
 
-        let kind = classifyHRPacket(data)
+        // DF packets that aren't the 21-byte DF 00 11 health format are status/info packets.
+        guard data.count == 21, data.first == 0xDF,
+              data.count > 2, data[2] == 0x11 else {
+            let typeDesc = data.count >= 3 ? String(format: "DF 00 %02X", data[2]) : "short"
+            lastHRPacketTypeDesc = "status packet"
+            logEvent("Watch status [\(typeDesc), \(data.count)B]: \(hex)")
+            return
+        }
+
+        let kind = classifyUARTPacket(data)
 
         switch kind {
         case .heartRateResult(let bpm):
@@ -628,7 +810,7 @@ final class BluetoothManager: NSObject {
                 }
             }
 
-        case .liveSensorOrStatus:
+        case .hrLiveSensorOrStatus:
             lastHRPacketTypeDesc = "0x0C = live sensor/status, ignored for dashboard"
             logEvent("HR packet: live/status [type=0x0C] — not updating dashboard [\(hex)]")
             if measurementState == .measuring || measurementState == .starting {
@@ -640,10 +822,58 @@ final class BluetoothManager: NSObject {
             lastHRPacketTypeDesc = "0x04 = HR result (BPM \(bpm) invalid, outside 30–220)"
             logEvent("HR packet: BPM \(bpm) out of valid range (30–220) [type=0x04] [\(hex)]")
 
+        case .bpResult(let sys, let dia):
+            lastHRPacketTypeDesc = "0x05 = BP result"
+            lastSystolic = sys
+            lastDiastolic = dia
+            lastBPDate = Date()
+            lastBPRawPacket = hex
+            logEvent("Blood pressure: \(sys)/\(dia) mmHg [type=0x05] [\(hex)]")
+            if bpMeasurementState.isActive {
+                bpMeasurementState = .complete
+                bpMeasurementTask?.cancel()
+                bpMeasurementTask = nil
+                logEvent("BP measurement: complete — \(sys)/\(dia) mmHg")
+            }
+            if let peripheral = connectedPeripheral, let writeChar = hrWriteChar {
+                peripheral.writeValue(Self.bpAckResult, for: writeChar, type: .withoutResponse)
+                logEvent("BP result ACK sent")
+            }
+
+        case .bpLiveData:
+            lastHRPacketTypeDesc = "0x02 = BP live data"
+            let point = BPLivePoint(index: bpLivePoints.count, rawValue: data[20])
+            bpLivePoints.append(point)
+            logEvent("BP live data [type=0x02] byte[20]=\(data[20]) [\(hex)]")
+            if let peripheral = connectedPeripheral, let writeChar = hrWriteChar {
+                peripheral.writeValue(Self.bpAckLiveData, for: writeChar, type: .withoutResponse)
+            }
+
+        case .spo2Result(let pct):
+            lastHRPacketTypeDesc = "0x0E = SpO2 result"
+            lastSpO2 = pct
+            lastSpO2Date = Date()
+            lastSpO2RawPacket = hex
+            logEvent("SpO2: \(pct)% [type=0x0E] [\(hex)]")
+            if spo2MeasurementState.isActive {
+                spo2MeasurementState = .complete
+                spo2MeasurementTask?.cancel()
+                spo2MeasurementTask = nil
+                logEvent("SpO2 measurement: complete — \(pct)%")
+            }
+            if let peripheral = connectedPeripheral, let writeChar = hrWriteChar {
+                peripheral.writeValue(Self.spo2AckResult, for: writeChar, type: .withoutResponse)
+                logEvent("SpO2 result ACK sent")
+            }
+
+        case .invalidSpO2Result(let pct):
+            lastHRPacketTypeDesc = "0x0E = SpO2 result (invalid: \(pct)%)"
+            logEvent("SpO2 packet: \(pct)% out of valid range (70–100) [type=0x0E] [\(hex)]")
+
         case .unknownHealthPacket(let typeByte):
-            let typeStr = typeByte.map { String(format: "byte[6]=0x%02X", $0) } ?? "malformed header"
+            let typeStr = typeByte.map { String(format: "byte[6]=0x%02X", $0) } ?? "unknown"
             lastHRPacketTypeDesc = "unknown (\(typeStr))"
-            logEvent("HR packet: unknown — \(typeStr), len=\(data.count) [\(hex)]")
+            logEvent("DF 00 11 packet: unknown type — \(typeStr) [\(hex)]")
         }
     }
 
@@ -952,6 +1182,9 @@ extension BluetoothManager: CBCentralManagerDelegate {
             connectedDeviceName = peripheral.name
             connectionState = .connected
             measurementState = .idle
+            bpMeasurementState = .idle
+            bpLivePoints.removeAll()
+            spo2MeasurementState = .idle
             isAutoConnecting = false
             UserDefaults.standard.set(peripheral.identifier.uuidString, forKey: Self.savedWatchUUIDKey)
             if let name = peripheral.name {
@@ -1004,6 +1237,12 @@ extension BluetoothManager: CBCentralManagerDelegate {
             measurementTask?.cancel()
             measurementTask = nil
             measurementState = .idle
+            bpMeasurementTask?.cancel()
+            bpMeasurementTask = nil
+            bpMeasurementState = .idle
+            spo2MeasurementTask?.cancel()
+            spo2MeasurementTask = nil
+            spo2MeasurementState = .idle
             if isRecordingInteraction { isRecordingInteraction = false }
             let duration = connectedAt.map { Date().timeIntervalSince($0) }
             lastDisconnectDuration = duration
@@ -1136,7 +1375,7 @@ extension BluetoothManager: CBPeripheralDelegate {
             }
             if let d = data {
                 if uuid == heartRateNotifyUUID {
-                    decodeHeartRatePacket(d)
+                    decodeUARTNotification(d)
                 } else if uuid == batteryLevelUUID, let level = d.first.map({ Int($0) }) {
                     let hex = CharacteristicInfo.toHex(d)
                     let isFirst = batteryLevel == nil

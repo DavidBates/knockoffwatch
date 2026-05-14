@@ -1,5 +1,6 @@
 import SwiftUI
 import CoreBluetooth
+import Charts
 
 struct ContentView: View {
     @State private var bluetooth = BluetoothManager()
@@ -26,6 +27,8 @@ struct ContentView: View {
                     batterySection
                 }
                 heartRateSection
+                bloodPressureSection
+                bloodOxygenSection
                 autoHRSection
                 toolsSection
                 BLEDebugSection(bluetooth: bluetooth)
@@ -292,6 +295,212 @@ struct ContentView: View {
         }
     }
 
+    // MARK: - Blood Pressure
+
+    private var bloodPressureSection: some View {
+        Section("🩺 Blood Pressure (Experimental)") {
+            if let sys = bluetooth.lastSystolic, let dia = bluetooth.lastDiastolic {
+                HStack(spacing: 12) {
+                    Image(systemName: "waveform.path.ecg")
+                        .font(.title2)
+                        .foregroundStyle(bluetooth.bpMeasurementState.isActive ? .red : .secondary)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("\(sys)/\(dia) mmHg")
+                            .font(.title.bold())
+                        if let date = bluetooth.lastBPDate {
+                            HStack(spacing: 2) {
+                                Text("Last updated")
+                                Text(date, style: .relative)
+                                Text("ago")
+                            }
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                .padding(.vertical, 4)
+            } else {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("No blood pressure data yet")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    if isConnected {
+                        Text("Tap Start BP to begin. Values are experimental.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .padding(.vertical, 2)
+            }
+
+            if !bluetooth.bpLivePoints.isEmpty {
+                bpLiveChart
+            }
+
+            if isConnected {
+                bpControls
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var bpControls: some View {
+        switch bluetooth.bpMeasurementState {
+
+        case .idle, .complete:
+            Button(action: bluetooth.startBPMeasurement) {
+                Label("Start BP", systemImage: "waveform.path.ecg.rectangle.fill")
+            }
+            .disabled(!bluetooth.isHRWriteCharAvailable)
+
+        case .starting:
+            HStack(spacing: 8) {
+                ProgressView().scaleEffect(0.8)
+                Text("Starting…")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+
+        case .measuring:
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(Color.red)
+                    .frame(width: 8, height: 8)
+                Text("Measuring…")
+                    .font(.subheadline.bold())
+                    .foregroundStyle(.red)
+                Spacer()
+                Button("Stop") { bluetooth.stopBPMeasurement() }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+            }
+
+        case .timeout:
+            VStack(alignment: .leading, spacing: 6) {
+                Text("No response from watch")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                Text("No BP result in 45s.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Button(action: bluetooth.startBPMeasurement) {
+                    Label("Retry", systemImage: "arrow.clockwise")
+                }
+                .disabled(!bluetooth.isHRWriteCharAvailable)
+            }
+        }
+    }
+
+    private var bpLiveChart: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Live signal (\(bluetooth.bpLivePoints.count) samples) — not medical data")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Chart(bluetooth.bpLivePoints) { point in
+                LineMark(
+                    x: .value("Sample", point.index),
+                    y: .value("Raw", Int(point.rawValue))
+                )
+                .foregroundStyle(.red)
+                .interpolationMethod(.catmullRom)
+            }
+            .frame(height: 80)
+            .chartXAxis(.hidden)
+        }
+    }
+
+    // MARK: - Blood Oxygen
+
+    private var bloodOxygenSection: some View {
+        Section("🫁 Blood Oxygen / SpO2 (Experimental)") {
+            if let pct = bluetooth.lastSpO2 {
+                HStack(spacing: 12) {
+                    Image(systemName: "lungs.fill")
+                        .font(.title2)
+                        .foregroundStyle(bluetooth.spo2MeasurementState.isActive ? .blue : .secondary)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("\(pct)%")
+                            .font(.title.bold())
+                        if let date = bluetooth.lastSpO2Date {
+                            HStack(spacing: 2) {
+                                Text("Last updated")
+                                Text(date, style: .relative)
+                                Text("ago")
+                            }
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                .padding(.vertical, 4)
+            } else {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("No SpO2 data yet")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    if isConnected {
+                        Text("Tap Start SpO2 to begin.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .padding(.vertical, 2)
+            }
+
+            if isConnected {
+                spo2Controls
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var spo2Controls: some View {
+        switch bluetooth.spo2MeasurementState {
+
+        case .idle, .complete:
+            Button(action: bluetooth.startSpO2Measurement) {
+                Label("Start SpO2", systemImage: "waveform.path.ecg.rectangle")
+            }
+            .disabled(!bluetooth.isHRWriteCharAvailable)
+
+        case .starting:
+            HStack(spacing: 8) {
+                ProgressView().scaleEffect(0.8)
+                Text("Starting…")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+
+        case .measuring:
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(Color.blue)
+                    .frame(width: 8, height: 8)
+                Text("Measuring…")
+                    .font(.subheadline.bold())
+                    .foregroundStyle(.blue)
+                Spacer()
+                Button("Stop") { bluetooth.stopSpO2Measurement() }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+            }
+
+        case .timeout:
+            VStack(alignment: .leading, spacing: 6) {
+                Text("No response from watch")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                Text("No SpO2 result in 30s.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Button(action: bluetooth.startSpO2Measurement) {
+                    Label("Retry", systemImage: "arrow.clockwise")
+                }
+                .disabled(!bluetooth.isHRWriteCharAvailable)
+            }
+        }
+    }
+
     // MARK: - Auto HR
 
     private var autoHRSection: some View {
@@ -441,6 +650,8 @@ struct BLEDebugSection: View {
                 sessionStatsRows
                 keepAliveRows
                 heartRateDebugRows
+                bpDebugRows
+                spo2DebugRows
                 eventLogGroup
             }
         }
@@ -519,6 +730,55 @@ struct BLEDebugSection: View {
         }()
         LabeledContent("HR measurement", value: stateLabel)
         LabeledContent("HR write char", value: bluetooth.isHRWriteCharAvailable ? "found" : "not found")
+    }
+
+    @ViewBuilder private var bpDebugRows: some View {
+        let bpState: String = {
+            switch bluetooth.bpMeasurementState {
+            case .idle:     return "idle"
+            case .starting: return "starting"
+            case .measuring: return "measuring"
+            case .complete: return "complete"
+            case .timeout:  return "timeout"
+            }
+        }()
+        LabeledContent("BP state", value: bpState)
+        LabeledContent("BP live samples", value: "\(bluetooth.bpLivePoints.count)")
+        if let sys = bluetooth.lastSystolic, let dia = bluetooth.lastDiastolic {
+            LabeledContent("BP result", value: "\(sys)/\(dia) mmHg")
+        }
+        if let raw = bluetooth.lastBPRawPacket {
+            LabeledContent("BP raw packet (\(raw.split(separator: " ").count)B)") {
+                Text(raw)
+                    .font(.system(.caption2, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.trailing)
+            }
+        }
+    }
+
+    @ViewBuilder private var spo2DebugRows: some View {
+        let spo2State: String = {
+            switch bluetooth.spo2MeasurementState {
+            case .idle:     return "idle"
+            case .starting: return "starting"
+            case .measuring: return "measuring"
+            case .complete: return "complete"
+            case .timeout:  return "timeout"
+            }
+        }()
+        LabeledContent("SpO2 state", value: spo2State)
+        if let pct = bluetooth.lastSpO2 {
+            LabeledContent("SpO2 result", value: "\(pct)%")
+        }
+        if let raw = bluetooth.lastSpO2RawPacket {
+            LabeledContent("SpO2 raw packet (\(raw.split(separator: " ").count)B)") {
+                Text(raw)
+                    .font(.system(.caption2, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.trailing)
+            }
+        }
     }
 
     private var eventLogGroup: some View {
