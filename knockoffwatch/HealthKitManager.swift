@@ -10,6 +10,7 @@ final class HealthKitManager {
     private(set) var authorizationStatus: AuthStatus = .notDetermined
     private(set) var saveHR: Bool = false
     private(set) var saveSpO2: Bool = false
+    private(set) var saveBP: Bool = false
     private(set) var lastSaveResult: String? = nil
     private(set) var lastSaveError: String? = nil
 
@@ -35,10 +36,13 @@ final class HealthKitManager {
 
     private static let hrType    = HKQuantityType(.heartRate)
     private static let spo2Type  = HKQuantityType(.oxygenSaturation)
-    private static let writeTypes: Set<HKSampleType> = [hrType, spo2Type]
+    private static let bpSysType = HKQuantityType(.bloodPressureSystolic)
+    private static let bpDiaType = HKQuantityType(.bloodPressureDiastolic)
+    private static let writeTypes: Set<HKSampleType> = [hrType, spo2Type, bpSysType, bpDiaType]
 
     private static let saveHRKey   = "knockoff.healthkit.saveHR"
     private static let saveSpO2Key = "knockoff.healthkit.saveSpO2"
+    private static let saveBPKey   = "knockoff.healthkit.saveBP"
 
     init() {
         guard isAvailable else {
@@ -48,6 +52,7 @@ final class HealthKitManager {
         refreshAuthStatus()
         saveHR   = UserDefaults.standard.bool(forKey: Self.saveHRKey)
         saveSpO2 = UserDefaults.standard.bool(forKey: Self.saveSpO2Key)
+        saveBP   = UserDefaults.standard.bool(forKey: Self.saveBPKey)
     }
 
     // MARK: - Authorization
@@ -61,8 +66,10 @@ final class HealthKitManager {
                 if !UserDefaults.standard.bool(forKey: "knockoff.healthkit.firstAuthDone") {
                     saveHR   = true
                     saveSpO2 = true
+                    saveBP   = true
                     UserDefaults.standard.set(true, forKey: Self.saveHRKey)
                     UserDefaults.standard.set(true, forKey: Self.saveSpO2Key)
+                    UserDefaults.standard.set(true, forKey: Self.saveBPKey)
                     UserDefaults.standard.set(true, forKey: "knockoff.healthkit.firstAuthDone")
                 }
             }
@@ -81,12 +88,21 @@ final class HealthKitManager {
         UserDefaults.standard.set(enabled, forKey: Self.saveSpO2Key)
     }
 
+    func setSaveBP(_ enabled: Bool) {
+        saveBP = enabled
+        UserDefaults.standard.set(enabled, forKey: Self.saveBPKey)
+    }
+
     private func refreshAuthStatus() {
-        let hrStatus   = store.authorizationStatus(for: Self.hrType)
-        let spo2Status = store.authorizationStatus(for: Self.spo2Type)
-        if hrStatus == .sharingAuthorized || spo2Status == .sharingAuthorized {
+        let statuses = [
+            store.authorizationStatus(for: Self.hrType),
+            store.authorizationStatus(for: Self.spo2Type),
+            store.authorizationStatus(for: Self.bpSysType),
+            store.authorizationStatus(for: Self.bpDiaType),
+        ]
+        if statuses.contains(.sharingAuthorized) {
             authorizationStatus = .authorized
-        } else if hrStatus == .sharingDenied && spo2Status == .sharingDenied {
+        } else if statuses.allSatisfy({ $0 == .sharingDenied }) {
             authorizationStatus = .denied
         } else {
             authorizationStatus = .notDetermined
@@ -120,6 +136,33 @@ final class HealthKitManager {
             metadata: makeMetadata(rawPacketHex: rawPacketHex)
         )
         await saveSample(sample, label: "SpO2 \(percentage)%")
+    }
+
+    func saveBloodPressure(systolic: Int, diastolic: Int, date: Date, rawPacketHex: String) async {
+        guard isAvailable, saveBP else { return }
+        let mmHg = HKUnit.millimeterOfMercury()
+        let metadata = makeMetadata(rawPacketHex: rawPacketHex)
+        let sysSample = HKQuantitySample(
+            type: Self.bpSysType,
+            quantity: HKQuantity(unit: mmHg, doubleValue: Double(systolic)),
+            start: date, end: date, metadata: metadata
+        )
+        let diaSample = HKQuantitySample(
+            type: Self.bpDiaType,
+            quantity: HKQuantity(unit: mmHg, doubleValue: Double(diastolic)),
+            start: date, end: date, metadata: metadata
+        )
+        do {
+            try await store.save([sysSample, diaSample])
+            await MainActor.run {
+                lastSaveResult = "BP \(systolic)/\(diastolic) mmHg saved at \(BLEEvent.timeFormatter.string(from: Date()))"
+                lastSaveError = nil
+            }
+        } catch {
+            await MainActor.run {
+                lastSaveError = "BP failed: \(error.localizedDescription)"
+            }
+        }
     }
 
     private func saveSample(_ sample: HKSample, label: String) async {

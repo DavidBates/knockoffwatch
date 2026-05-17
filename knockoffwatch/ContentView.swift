@@ -3,7 +3,7 @@ import CoreBluetooth
 import Charts
 
 struct ContentView: View {
-    @State private var bluetooth = BluetoothManager()
+    @Environment(BluetoothManager.self) private var bluetooth
 
     private var isConnected: Bool {
         if case .connected = bluetooth.connectionState { return true }
@@ -29,7 +29,7 @@ struct ContentView: View {
                 heartRateSection
                 bloodPressureSection
                 bloodOxygenSection
-                autoHRSection
+                autoSyncSection
                 healthSection
                 toolsSection
                 BLEDebugSection(bluetooth: bluetooth)
@@ -210,9 +210,15 @@ struct ContentView: View {
                 .padding(.vertical, 2)
             }
 
-            // Measurement controls — only when connected
+            // Measurement controls — only when connected and no sync running
             if isConnected {
-                measurementControls
+                if bluetooth.isSyncSessionActive {
+                    Label("Auto Health Sync is running", systemImage: "arrow.triangle.2.circlepath")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    measurementControls
+                }
             }
         }
     }
@@ -339,7 +345,13 @@ struct ContentView: View {
             }
 
             if isConnected {
-                bpControls
+                if bluetooth.isSyncSessionActive {
+                    Label("Auto Health Sync is running", systemImage: "arrow.triangle.2.circlepath")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    bpControls
+                }
             }
         }
     }
@@ -354,12 +366,16 @@ struct ContentView: View {
             }
             .disabled(!bluetooth.isHRWriteCharAvailable)
 
-        case .starting:
+        case .sendingStart:
             HStack(spacing: 8) {
                 ProgressView().scaleEffect(0.8)
                 Text("Starting…")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
+                Spacer()
+                Button("Cancel") { bluetooth.stopBPMeasurement() }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
             }
 
         case .measuring:
@@ -376,13 +392,18 @@ struct ContentView: View {
                     .controlSize(.small)
             }
 
-        case .timeout:
-            VStack(alignment: .leading, spacing: 6) {
-                Text("No response from watch")
+        case .receivedResult:
+            HStack(spacing: 8) {
+                ProgressView().scaleEffect(0.8)
+                Text("Processing result…")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
-                Text("No BP result in 45s.")
-                    .font(.caption)
+            }
+
+        case .timeout:
+            VStack(alignment: .leading, spacing: 6) {
+                Text(bluetooth.bpTimeoutReason ?? "Measurement timed out")
+                    .font(.subheadline)
                     .foregroundStyle(.secondary)
                 Button(action: bluetooth.startBPMeasurement) {
                     Label("Retry", systemImage: "arrow.clockwise")
@@ -449,7 +470,13 @@ struct ContentView: View {
             }
 
             if isConnected {
-                spo2Controls
+                if bluetooth.isSyncSessionActive {
+                    Label("Auto Health Sync is running", systemImage: "arrow.triangle.2.circlepath")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    spo2Controls
+                }
             }
         }
     }
@@ -502,57 +529,81 @@ struct ContentView: View {
         }
     }
 
-    // MARK: - Auto HR
+    // MARK: - Auto Health Sync
 
-    private var autoHRSection: some View {
+    private var autoSyncSection: some View {
         Section {
-            Toggle("Auto HR Checks", isOn: Binding(
-                get: { bluetooth.autoHREnabled },
-                set: { bluetooth.setAutoHREnabled($0) }
+            Toggle("Auto Health Sync", isOn: Binding(
+                get: { bluetooth.autoSyncEnabled },
+                set: { bluetooth.setAutoSyncEnabled($0) }
             ))
 
-            if bluetooth.autoHREnabled {
-                Picker("Interval", selection: Binding(
-                    get: { bluetooth.autoHRInterval },
-                    set: { bluetooth.setAutoHRInterval($0) }
+            if bluetooth.autoSyncEnabled {
+                Picker("Foreground interval", selection: Binding(
+                    get: { bluetooth.foregroundSyncInterval },
+                    set: { bluetooth.setForegroundSyncInterval($0) }
                 )) {
-                    ForEach(AutoHRInterval.allCases) { interval in
+                    ForEach(ForegroundSyncInterval.allCases) { interval in
                         Text(interval.label).tag(interval)
                     }
                 }
 
-                if bluetooth.autoHRInterval == .oneMinute {
-                    HStack(alignment: .top, spacing: 8) {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .foregroundStyle(.orange)
-                            .padding(.top, 1)
-                        Text("One-minute checks may significantly reduce watch battery and may not work reliably in the background.")
-                            .font(.caption)
+                Picker("Background interval", selection: Binding(
+                    get: { bluetooth.backgroundSyncInterval },
+                    set: { bluetooth.setBackgroundSyncInterval($0) }
+                )) {
+                    ForEach(BackgroundSyncInterval.allCases) { interval in
+                        Text(interval.label).tag(interval)
                     }
                 }
 
-                if let next = bluetooth.nextScheduledCheck {
+                if bluetooth.isSyncSessionActive {
                     HStack(spacing: 8) {
-                        Image(systemName: "clock").foregroundStyle(.secondary)
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text("Next check")
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                            HStack(spacing: 3) {
-                                Text(next, style: .relative)
-                                Text("from now")
-                            }
-                            .font(.caption)
-                        }
+                        ProgressView().scaleEffect(0.8)
+                        Text(bluetooth.syncSessionState.label)
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
                     }
                 }
+
+                if let last = bluetooth.lastSyncTime {
+                    LabeledContent("Last sync") {
+                        Text(last, style: .relative)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                if let next = bluetooth.nextSyncTime {
+                    LabeledContent("Next sync") {
+                        HStack(spacing: 3) {
+                            Text(next, style: .relative)
+                            Text("from now")
+                        }
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    }
+                }
+
+                if let err = bluetooth.lastSyncError {
+                    Label(err, systemImage: "exclamationmark.triangle")
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
+
+                Button {
+                    bluetooth.triggerAutoSync()
+                } label: {
+                    Label("Sync Now", systemImage: "arrow.triangle.2.circlepath")
+                }
+                .disabled(bluetooth.isSyncSessionActive)
             }
 
-            Text("Automatic checks run reliably while the app is open. iOS may limit checks when the app is in the background.")
+            Text("Each sync connects to the watch and takes a full HR, BP, and SpO2 reading in sequence. Foreground syncs run while the app is open. Background syncs are system-managed and may run later than configured.")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
         } header: {
-            Text("Heart Rate Schedule")
+            Text("Auto Health Sync")
         }
     }
 
@@ -582,6 +633,10 @@ struct ContentView: View {
                 Toggle("Save Heart Rate", isOn: Binding(
                     get: { hk.saveHR },
                     set: { hk.setSaveHR($0) }
+                ))
+                Toggle("Save Blood Pressure", isOn: Binding(
+                    get: { hk.saveBP },
+                    set: { hk.setSaveBP($0) }
                 ))
                 Toggle("Save Blood Oxygen (SpO2)", isOn: Binding(
                     get: { hk.saveSpO2 },
@@ -798,14 +853,20 @@ struct BLEDebugSection: View {
     @ViewBuilder private var bpDebugRows: some View {
         let bpState: String = {
             switch bluetooth.bpMeasurementState {
-            case .idle:     return "idle"
-            case .starting: return "starting"
-            case .measuring: return "measuring"
-            case .complete: return "complete"
-            case .timeout:  return "timeout"
+            case .idle:            return "idle"
+            case .sendingStart:    return "sendingStart"
+            case .measuring:       return "measuring"
+            case .receivedResult:  return "receivedResult"
+            case .complete:        return "complete"
+            case .timeout:         return "timeout"
             }
         }()
         LabeledContent("BP state", value: bpState)
+        if let reason = bluetooth.bpTimeoutReason {
+            LabeledContent("BP timeout") {
+                Text(reason).font(.caption).foregroundStyle(.red).multilineTextAlignment(.trailing)
+            }
+        }
         LabeledContent("BP live samples", value: "\(bluetooth.bpLivePoints.count)")
         if let sys = bluetooth.lastSystolic, let dia = bluetooth.lastDiastolic {
             LabeledContent("BP result", value: "\(sys)/\(dia) mmHg")
@@ -903,4 +964,5 @@ struct PeripheralRow: View {
 
 #Preview {
     ContentView()
+        .environment(BluetoothManager())
 }

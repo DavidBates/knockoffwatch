@@ -1,5 +1,6 @@
 import Foundation
 import CoreBluetooth
+import BackgroundTasks
 
 // MARK: - Supporting Types
 
@@ -115,21 +116,67 @@ enum KeepAliveMode: Equatable {
     }
 }
 
-enum AutoHRInterval: Int, CaseIterable, Identifiable {
-    case oneMinute      = 60
+enum ForegroundSyncInterval: Int, CaseIterable, Identifiable {
     case fiveMinutes    = 300
     case fifteenMinutes = 900
-    case thirtyMinutes  = 1800
 
     var id: Int { rawValue }
     var seconds: TimeInterval { TimeInterval(rawValue) }
 
     var label: String {
         switch self {
-        case .oneMinute:      return "1 minute"
         case .fiveMinutes:    return "5 minutes"
         case .fifteenMinutes: return "15 minutes"
-        case .thirtyMinutes:  return "30 minutes"
+        }
+    }
+}
+
+enum BackgroundSyncInterval: Int, CaseIterable, Identifiable {
+    case thirtyMinutes = 1800
+    case sixtyMinutes  = 3600
+
+    var id: Int { rawValue }
+    var seconds: TimeInterval { TimeInterval(rawValue) }
+
+    var label: String {
+        switch self {
+        case .thirtyMinutes: return "30 minutes"
+        case .sixtyMinutes:  return "60 minutes"
+        }
+    }
+}
+
+enum SyncSessionState: Equatable {
+    case idle
+    case connecting
+    case subscribing
+    case syncingHeartRate
+    case syncingBloodPressurePrep
+    case syncingBloodPressure
+    case syncingSpO2
+    case disconnecting
+    case complete
+    case failed(String)
+
+    var isActive: Bool {
+        switch self {
+        case .idle, .complete, .failed: return false
+        default: return true
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .idle:                     return "Idle"
+        case .connecting:               return "Connecting…"
+        case .subscribing:              return "Preparing…"
+        case .syncingHeartRate:         return "Measuring heart rate…"
+        case .syncingBloodPressurePrep: return "Preparing blood pressure…"
+        case .syncingBloodPressure:     return "Measuring blood pressure…"
+        case .syncingSpO2:              return "Measuring blood oxygen…"
+        case .disconnecting:            return "Finishing…"
+        case .complete:                 return "Complete"
+        case .failed(let reason):       return "Failed: \(reason)"
         }
     }
 }
@@ -154,15 +201,16 @@ enum HRMeasurementState: Equatable {
 
 enum BPMeasurementState: Equatable {
     case idle
-    case starting
-    case measuring
+    case sendingStart    // start command sent; expecting FD 00 05 1D 02 0E 00 0A 01
+    case measuring       // start ACKed; waiting for DF 00 11 result packet
+    case receivedResult  // result received and ACKed, transitioning to complete
     case complete
-    case timeout
+    case timeout         // see bpTimeoutReason for detail
 
     var isActive: Bool {
         switch self {
-        case .starting, .measuring: return true
-        default: return false
+        case .idle, .complete, .timeout: return false
+        default: return true
         }
     }
 }
@@ -240,6 +288,7 @@ final class BluetoothManager: NSObject {
     private(set) var lastBPDate: Date? = nil
     private(set) var lastBPRawPacket: String? = nil
     private(set) var bpMeasurementState: BPMeasurementState = .idle
+    private(set) var bpTimeoutReason: String? = nil
     private(set) var bpLivePoints: [BPLivePoint] = []
 
     // Blood oxygen state — resets on disconnect
@@ -259,10 +308,14 @@ final class BluetoothManager: NSObject {
     private(set) var isAutoConnecting: Bool = false
     private(set) var savedWatchName: String? = nil
 
-    // Scheduled HR checks
-    private(set) var autoHREnabled: Bool = false
-    private(set) var autoHRInterval: AutoHRInterval = .fiveMinutes
-    private(set) var nextScheduledCheck: Date? = nil
+    // Auto Health Sync
+    private(set) var autoSyncEnabled: Bool = false
+    private(set) var foregroundSyncInterval: ForegroundSyncInterval = .fiveMinutes
+    private(set) var backgroundSyncInterval: BackgroundSyncInterval = .thirtyMinutes
+    private(set) var syncSessionState: SyncSessionState = .idle
+    private(set) var lastSyncTime: Date? = nil
+    private(set) var lastSyncError: String? = nil
+    private(set) var nextSyncTime: Date? = nil
 
     private(set) var keepAliveMode: KeepAliveMode = .none
     var keepAliveIntervalSeconds: Double = 5.0
@@ -283,6 +336,7 @@ final class BluetoothManager: NSObject {
     private var bpMeasurementTask: Task<Void, Never>?
     private var spo2MeasurementTask: Task<Void, Never>?
     private var schedulerTask: Task<Void, Never>?
+    private var syncTask: Task<Void, Never>?
     private var sessionStartTime: Date?
     private var lastWriteByPair: [String: (time: Date, hex: String)] = [:]
 
@@ -294,9 +348,9 @@ final class BluetoothManager: NSObject {
     private static let hrStopCommand  = Data([0xDF, 0x00, 0x06, 0xF6, 0x02, 0x01, 0x0D, 0x00, 0x01, 0x00])
     private static let hrCommandAck   = Data([0xFD, 0x00, 0x05, 0x1C, 0x02, 0x0D, 0x00, 0x0A, 0x01])
 
-    private static let bpStartCommand = Data([0xDF, 0x00, 0x06, 0xF4, 0x02, 0x01, 0x0A, 0x00, 0x01, 0x01])
+    private static let bpStartCommand = Data([0xDF, 0x00, 0x06, 0xF8, 0x02, 0x01, 0x0E, 0x00, 0x01, 0x01])
     private static let bpStopCommand  = Data([0xDF, 0x00, 0x06, 0xFB, 0x13, 0x01, 0x01, 0x00, 0x01, 0x00])
-    private static let bpStartAck     = Data([0xFD, 0x00, 0x05, 0x19, 0x02, 0x0A, 0x00, 0x0A, 0x01])
+    private static let bpStartAck     = Data([0xFD, 0x00, 0x05, 0x1D, 0x02, 0x0E, 0x00, 0x0A, 0x01])
     private static let bpAckResult    = Data([0xFD, 0x00, 0x05, 0x22, 0x05, 0x05, 0x00, 0x15, 0x01])
     private static let bpAckLiveData  = Data([0xFD, 0x00, 0x05, 0xD5, 0x05, 0x02, 0x00, 0xCB, 0x01])
 
@@ -305,19 +359,64 @@ final class BluetoothManager: NSObject {
     private static let spo2CmdAck       = Data([0xFD, 0x00, 0x05, 0x2B, 0x02, 0x1C, 0x00, 0x0A, 0x01])
     private static let spo2AckResult    = Data([0xFD, 0x00, 0x05, 0x2B, 0x05, 0x0E, 0x00, 0x15, 0x01])
 
-    private static let savedWatchUUIDKey = "knockoff.savedWatchUUID"
-    private static let savedWatchNameKey = "knockoff.savedWatchName"
-    private static let autoHREnabledKey  = "knockoff.autoHREnabled"
-    private static let autoHRIntervalKey = "knockoff.autoHRInterval"
+    private static let savedWatchUUIDKey          = "knockoff.savedWatchUUID"
+    private static let savedWatchNameKey          = "knockoff.savedWatchName"
+    private static let autoSyncEnabledKey         = "knockoff.autoSyncEnabled"
+    private static let foregroundSyncIntervalKey  = "knockoff.foregroundSyncInterval"
+    private static let backgroundSyncIntervalKey  = "knockoff.backgroundSyncInterval"
+
+    static let bgSyncTaskIdentifier = "com.magician.knockoffwatch.healthsync"
+    static weak var shared: BluetoothManager?
 
     var isScanning: Bool { central?.isScanning ?? false }
 
+    // MARK: - Config validation
+
+    @discardableResult
+    static func validateBackgroundConfig() -> Bool {
+        let modes = Bundle.main.infoDictionary?["UIBackgroundModes"] as? [String] ?? []
+        let hasBluetooth = modes.contains("bluetooth-central")
+        let hasFetch    = modes.contains("fetch")
+        print("[BLE] UIBackgroundModes: \(modes.isEmpty ? "(none)" : modes.joined(separator: ", "))")
+        print("[BLE] bluetooth-central: \(hasBluetooth ? "PRESENT ✓" : "MISSING ✗")")
+        print("[BLE] fetch: \(hasFetch ? "PRESENT ✓" : "MISSING ✗")")
+        if !hasBluetooth {
+            print("[BLE] ⚠️ State restoration requires bluetooth-central background mode")
+        }
+        return hasBluetooth
+    }
+
     override init() {
         super.init()
-        central = CBCentralManager(delegate: self, queue: .main)
-        autoHREnabled = UserDefaults.standard.bool(forKey: Self.autoHREnabledKey)
-        let rawInterval = UserDefaults.standard.integer(forKey: Self.autoHRIntervalKey)
-        autoHRInterval = AutoHRInterval(rawValue: rawInterval) ?? .fiveMinutes
+        Self.shared = self
+
+        let hasBackground = Self.validateBackgroundConfig()
+        #if DEBUG
+        if hasBackground {
+            print("[BLE] State restoration: ENABLED (identifier: com.magician.knockoffwatch.central)")
+            central = CBCentralManager(
+                delegate: self,
+                queue: .main,
+                options: [CBCentralManagerOptionRestoreIdentifierKey: "com.magician.knockoffwatch.central"]
+            )
+        } else {
+            print("[BLE] ⚠️ DEBUG: bluetooth-central missing — state restoration DISABLED to avoid crash")
+            central = CBCentralManager(delegate: self, queue: .main)
+        }
+        #else
+        print("[BLE] State restoration: ENABLED (identifier: com.magician.knockoffwatch.central)")
+        central = CBCentralManager(
+            delegate: self,
+            queue: .main,
+            options: [CBCentralManagerOptionRestoreIdentifierKey: "com.magician.knockoffwatch.central"]
+        )
+        #endif
+
+        autoSyncEnabled = UserDefaults.standard.bool(forKey: Self.autoSyncEnabledKey)
+        let rawFg = UserDefaults.standard.integer(forKey: Self.foregroundSyncIntervalKey)
+        foregroundSyncInterval = ForegroundSyncInterval(rawValue: rawFg) ?? .fiveMinutes
+        let rawBg = UserDefaults.standard.integer(forKey: Self.backgroundSyncIntervalKey)
+        backgroundSyncInterval = BackgroundSyncInterval(rawValue: rawBg) ?? .thirtyMinutes
         savedWatchName = UserDefaults.standard.string(forKey: Self.savedWatchNameKey)
     }
 
@@ -392,21 +491,43 @@ final class BluetoothManager: NSObject {
         UserDefaults.standard.removeObject(forKey: Self.savedWatchUUIDKey)
         UserDefaults.standard.removeObject(forKey: Self.savedWatchNameKey)
         savedWatchName = nil
-        stopScheduler()
+        stopForegroundScheduler()
         statusMessage = "Watch forgotten. Tap Scan to find a new device."
         logEvent("Saved watch forgotten")
     }
 
-    func setAutoHREnabled(_ enabled: Bool) {
-        autoHREnabled = enabled
-        UserDefaults.standard.set(enabled, forKey: Self.autoHREnabledKey)
-        if enabled, case .connected = connectionState { startScheduler() } else { stopScheduler() }
+    var isSyncSessionActive: Bool { syncSessionState.isActive }
+
+    func setAutoSyncEnabled(_ enabled: Bool) {
+        autoSyncEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: Self.autoSyncEnabledKey)
+        if enabled {
+            startForegroundScheduler(runImmediately: true)
+            scheduleBackgroundSync()
+        } else {
+            stopForegroundScheduler()
+        }
     }
 
-    func setAutoHRInterval(_ interval: AutoHRInterval) {
-        autoHRInterval = interval
-        UserDefaults.standard.set(interval.rawValue, forKey: Self.autoHRIntervalKey)
-        if autoHREnabled, case .connected = connectionState { startScheduler() }
+    func setForegroundSyncInterval(_ interval: ForegroundSyncInterval) {
+        foregroundSyncInterval = interval
+        UserDefaults.standard.set(interval.rawValue, forKey: Self.foregroundSyncIntervalKey)
+        if autoSyncEnabled { startForegroundScheduler() }
+    }
+
+    func setBackgroundSyncInterval(_ interval: BackgroundSyncInterval) {
+        backgroundSyncInterval = interval
+        UserDefaults.standard.set(interval.rawValue, forKey: Self.backgroundSyncIntervalKey)
+        if autoSyncEnabled { scheduleBackgroundSync() }
+    }
+
+    func triggerAutoSync() {
+        guard autoSyncEnabled else { return }
+        logEvent("Auto Health Sync: manual trigger")
+        syncTask?.cancel()
+        syncTask = Task { @MainActor [weak self] in
+            await self?.runSyncSession()
+        }
     }
 
     func refreshBattery() {
@@ -426,7 +547,6 @@ final class BluetoothManager: NSObject {
             logEvent("HR measurement: cannot start — not connected or write char unavailable")
             return
         }
-        if keepAliveMode == .none { setKeepAliveMode(.batteryRead) }
         if let notifyChar = heartRateNotifyChar, !notifyChar.isNotifying {
             peripheral.setNotifyValue(true, for: notifyChar)
         }
@@ -475,21 +595,39 @@ final class BluetoothManager: NSObject {
             peripheral.setNotifyValue(true, for: notifyChar)
         }
         bpLivePoints.removeAll()
-        bpMeasurementState = .starting
-        let hex = CharacteristicInfo.toHex(Self.bpStartCommand)
+        bpTimeoutReason = nil
+
+        let startHex = CharacteristicInfo.toHex(Self.bpStartCommand)
         peripheral.writeValue(Self.bpStartCommand, for: writeChar, type: .withoutResponse)
-        logEvent("BP measurement: start command sent [\(hex)]")
+        logEvent("BP measurement: start command sent [\(startHex)]")
         appendProtocolEvent(kind: .write, charUUID: writeChar.uuid.uuidString,
-                            hexBytes: hex, byteCount: Self.bpStartCommand.count,
+                            hexBytes: startHex, byteCount: Self.bpStartCommand.count,
                             writeType: "withoutResponse")
+        bpMeasurementState = .sendingStart
+
+        bpMeasurementTask?.cancel()
+        bpMeasurementTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(5))
+            guard let self, !Task.isCancelled else { return }
+            if self.bpMeasurementState == .sendingStart {
+                self.bpMeasurementState = .timeout
+                self.bpTimeoutReason = "Watch did not acknowledge BP start command"
+                self.logEvent("BP measurement: start ACK timed out")
+            }
+        }
+    }
+
+    private func bpStartAckReceived() {
+        logEvent("BP measurement: start acknowledged — measuring")
         bpMeasurementState = .measuring
 
         bpMeasurementTask?.cancel()
         bpMeasurementTask = Task { @MainActor [weak self] in
             try? await Task.sleep(for: .seconds(45))
             guard let self, !Task.isCancelled else { return }
-            if self.bpMeasurementState.isActive {
+            if self.bpMeasurementState == .measuring {
                 self.bpMeasurementState = .timeout
+                self.bpTimeoutReason = "No BP result received within 45 seconds"
                 self.logEvent("BP measurement: timed out — no result packet in 45s")
             }
         }
@@ -498,11 +636,12 @@ final class BluetoothManager: NSObject {
     func stopBPMeasurement() {
         bpMeasurementTask?.cancel()
         bpMeasurementTask = nil
+        bpTimeoutReason = nil
         if bpMeasurementState.isActive {
             if let peripheral = connectedPeripheral, let writeChar = hrWriteChar {
                 let hex = CharacteristicInfo.toHex(Self.bpStopCommand)
                 peripheral.writeValue(Self.bpStopCommand, for: writeChar, type: .withoutResponse)
-                logEvent("BP measurement: stop command sent (experimental) [\(hex)]")
+                logEvent("BP measurement: stop command sent [\(hex)]")
             }
             bpMeasurementState = .idle
             logEvent("BP measurement: stopped by user")
@@ -770,8 +909,12 @@ final class BluetoothManager: NSObject {
                 lastHRPacketTypeDesc = "HR command ACK"
                 logEvent("HR command acknowledged: \(hex)")
             } else if data == Self.bpStartAck {
-                lastHRPacketTypeDesc = "BP command ACK"
-                logEvent("BP command acknowledged: \(hex)")
+                lastHRPacketTypeDesc = "BP start ACK"
+                if bpMeasurementState == .sendingStart {
+                    bpStartAckReceived()
+                } else {
+                    logEvent("BP start ACK received (unexpected state: \(bpMeasurementState))")
+                }
             } else if data == Self.spo2CmdAck {
                 lastHRPacketTypeDesc = "SpO2 command ACK"
                 logEvent("SpO2 command acknowledged: \(hex)")
@@ -829,20 +972,33 @@ final class BluetoothManager: NSObject {
 
         case .bpResult(let sys, let dia):
             lastHRPacketTypeDesc = "0x05 = BP result"
-            lastSystolic = sys
-            lastDiastolic = dia
-            lastBPDate = Date()
-            lastBPRawPacket = hex
-            logEvent("Blood pressure: \(sys)/\(dia) mmHg [type=0x05] [\(hex)]")
-            if bpMeasurementState.isActive {
+            let bpIsValid = (70...220).contains(sys) && (40...140).contains(dia) && sys > dia
+            if bpIsValid {
+                lastSystolic = sys
+                lastDiastolic = dia
+                let bpDate = Date()
+                lastBPDate = bpDate
+                lastBPRawPacket = hex
+                logEvent("Blood pressure: \(sys)/\(dia) mmHg [type=0x05] [\(hex)]")
+                if bpMeasurementState.isActive {
+                    bpMeasurementState = .receivedResult
+                    bpMeasurementTask?.cancel()
+                    bpMeasurementTask = nil
+                }
+                if let peripheral = connectedPeripheral, let writeChar = hrWriteChar {
+                    peripheral.writeValue(Self.bpAckResult, for: writeChar, type: .withoutResponse)
+                    logEvent("BP result ACK sent")
+                }
                 bpMeasurementState = .complete
-                bpMeasurementTask?.cancel()
-                bpMeasurementTask = nil
                 logEvent("BP measurement: complete — \(sys)/\(dia) mmHg")
-            }
-            if let peripheral = connectedPeripheral, let writeChar = hrWriteChar {
-                peripheral.writeValue(Self.bpAckResult, for: writeChar, type: .withoutResponse)
-                logEvent("BP result ACK sent")
+                let hk = healthKit
+                Task { await hk.saveBloodPressure(systolic: sys, diastolic: dia, date: bpDate, rawPacketHex: hex) }
+            } else {
+                logEvent("BP result rejected: \(sys)/\(dia) mmHg — outside valid range [sys:70-220, dia:40-140, sys>dia] [\(hex)]")
+                if let peripheral = connectedPeripheral, let writeChar = hrWriteChar {
+                    peripheral.writeValue(Self.bpAckResult, for: writeChar, type: .withoutResponse)
+                    logEvent("BP result ACK sent")
+                }
             }
 
         case .bpLiveData:
@@ -1055,73 +1211,209 @@ final class BluetoothManager: NSObject {
                                    options: [CBCentralManagerScanOptionAllowDuplicatesKey: false])
     }
 
-    // MARK: - Scheduler
+    // MARK: - Foreground scheduler
 
-    private func startScheduler() {
-        guard autoHREnabled else { return }
-        stopScheduler()
-        logEvent("Auto HR: scheduler started — \(autoHRInterval.label) interval")
+    private func startForegroundScheduler(runImmediately: Bool = false) {
+        guard autoSyncEnabled else { return }
+        stopForegroundScheduler()
+        logEvent("Auto Health Sync: foreground scheduler started — \(foregroundSyncInterval.label) interval")
 
         schedulerTask = Task { @MainActor [weak self] in
-            var count = 0
-            while !Task.isCancelled {
-                guard let this = self, this.autoHREnabled else { break }
-                let interval = this.autoHRInterval.seconds
-                let next = Date().addingTimeInterval(interval)
-                this.nextScheduledCheck = next
-                this.logEvent("Auto HR: next check in \(this.autoHRInterval.label)")
+            if runImmediately, let this = self, this.autoSyncEnabled, !Task.isCancelled {
+                this.nextSyncTime = nil
+                this.logEvent("Auto Health Sync: running immediately on enable")
+                await this.runSyncSession()
+            }
+            while !Task.isCancelled, let this = self, this.autoSyncEnabled {
+                let interval = this.foregroundSyncInterval.seconds
+                this.nextSyncTime = Date().addingTimeInterval(interval)
+                this.logEvent("Auto Health Sync: next sync in \(this.foregroundSyncInterval.label)")
 
                 try? await Task.sleep(for: .seconds(interval))
                 if Task.isCancelled { break }
 
-                guard this.autoHREnabled, !Task.isCancelled else { break }
-                count += 1
-                this.nextScheduledCheck = nil
-                this.logEvent("Auto HR: running scheduled check #\(count)")
-                await this.runScheduledHRCheck()
+                guard let this2 = self, this2.autoSyncEnabled, !Task.isCancelled else { break }
+                this2.nextSyncTime = nil
+                this2.logEvent("Auto Health Sync: running scheduled sync")
+                await this2.runSyncSession()
             }
-            self?.nextScheduledCheck = nil
+            self?.nextSyncTime = nil
         }
     }
 
-    private func stopScheduler() {
+    private func stopForegroundScheduler() {
         guard schedulerTask != nil else { return }
         schedulerTask?.cancel()
         schedulerTask = nil
-        nextScheduledCheck = nil
-        logEvent("Auto HR: scheduler stopped")
+        nextSyncTime = nil
+        logEvent("Auto Health Sync: foreground scheduler stopped")
     }
 
-    private func runScheduledHRCheck() async {
-        guard case .connected = connectionState else {
-            logEvent("Auto HR: skipped — not connected")
-            return
-        }
-        guard !measurementState.isActive else {
-            logEvent("Auto HR: skipped — measurement already running")
-            return
-        }
-        logEvent("Auto HR: starting check")
-        startHeartRateMeasurement()
+    // MARK: - Sync session
 
-        let deadline = Date().addingTimeInterval(45)
+    private func runSyncSession() async {
+        guard autoSyncEnabled else { return }
+        logEvent("Sync session: starting")
+        syncSessionState = .connecting
+        lastSyncError = nil
+
+        guard await connectForSync(), !Task.isCancelled else {
+            if !Task.isCancelled {
+                let msg = "Could not connect to watch"
+                syncSessionState = .failed(msg)
+                lastSyncError = msg
+                logEvent("Sync session: failed — \(msg)")
+            }
+            return
+        }
+
+        syncSessionState = .subscribing
+        try? await Task.sleep(for: .seconds(1))
+        guard !Task.isCancelled else { return }
+
+        await syncMeasureHR(timeout: 45)
+        guard !Task.isCancelled else { return }
+
+        await syncMeasureBP(timeout: 60)
+        guard !Task.isCancelled else { return }
+
+        await syncMeasureSpO2(timeout: 45)
+        guard !Task.isCancelled else { return }
+
+        syncSessionState = .disconnecting
+        logEvent("Sync session: complete, disconnecting")
+        disconnect()
+        try? await Task.sleep(for: .seconds(2))
+
+        lastSyncTime = Date()
+        syncSessionState = .complete
+        logEvent("Sync session: done — HR:\(lastHeartRate.map { "\($0)" } ?? "-") BP:\(lastSystolic.map { "\($0)" } ?? "-")/\(lastDiastolic.map { "\($0)" } ?? "-") SpO2:\(lastSpO2.map { "\($0)" } ?? "-%")")
+    }
+
+    private func connectForSync() async -> Bool {
+        if case .connected = connectionState, isHRWriteCharAvailable { return true }
+        guard centralState == .poweredOn else {
+            logEvent("Sync: cannot connect — Bluetooth not powered on")
+            return false
+        }
+        if case .connected = connectionState {
+            // Connected but UART not yet ready — just wait below
+        } else {
+            attemptAutoConnect()
+        }
+        let deadline = Date().addingTimeInterval(30)
+        while Date() < deadline, !Task.isCancelled {
+            if case .connected = connectionState, isHRWriteCharAvailable { return true }
+            if case .failed = connectionState { return false }
+            try? await Task.sleep(for: .milliseconds(500))
+        }
+        logEvent("Sync: connection timed out")
+        return false
+    }
+
+    private func syncMeasureHR(timeout: TimeInterval) async {
+        syncSessionState = .syncingHeartRate
+        guard case .connected = connectionState, isHRWriteCharAvailable,
+              !measurementState.isActive else {
+            logEvent("Sync: HR skipped — not ready")
+            return
+        }
+        startHeartRateMeasurement()
+        let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline, !Task.isCancelled {
             switch measurementState {
             case .complete:
-                logEvent("Auto HR: check complete — \(lastHeartRate.map { "\($0) bpm" } ?? "?")")
+                logEvent("Sync: HR done — \(lastHeartRate.map { "\($0) bpm" } ?? "?")")
                 return
-            case .timeout:
-                logEvent("Auto HR: check ended by measurement timeout")
+            case .timeout, .idle:
+                logEvent("Sync: HR ended (state: \(measurementState))")
                 return
-            default:
-                break
+            default: break
             }
             try? await Task.sleep(for: .milliseconds(500))
         }
+        logEvent("Sync: HR deadline exceeded")
+        stopHeartRateMeasurement()
+    }
 
-        if !Task.isCancelled {
-            logEvent("Auto HR: check timed out (45s deadline)")
-            stopHeartRateMeasurement()
+    private func syncMeasureBP(timeout: TimeInterval) async {
+        syncSessionState = .syncingBloodPressurePrep
+        guard case .connected = connectionState, isHRWriteCharAvailable,
+              !bpMeasurementState.isActive else {
+            logEvent("Sync: BP skipped — not ready")
+            return
+        }
+        startBPMeasurement()
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline, !Task.isCancelled {
+            switch bpMeasurementState {
+            case .complete:
+                logEvent("Sync: BP done — \(lastSystolic.map { "\($0)" } ?? "-")/\(lastDiastolic.map { "\($0)" } ?? "-") mmHg")
+                return
+            case .timeout, .idle:
+                logEvent("Sync: BP ended (state: \(bpMeasurementState))")
+                return
+            case .measuring:
+                syncSessionState = .syncingBloodPressure
+            default: break
+            }
+            try? await Task.sleep(for: .milliseconds(500))
+        }
+        logEvent("Sync: BP deadline exceeded")
+        stopBPMeasurement()
+    }
+
+    private func syncMeasureSpO2(timeout: TimeInterval) async {
+        syncSessionState = .syncingSpO2
+        guard case .connected = connectionState, isHRWriteCharAvailable,
+              !spo2MeasurementState.isActive else {
+            logEvent("Sync: SpO2 skipped — not ready")
+            return
+        }
+        startSpO2Measurement()
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline, !Task.isCancelled {
+            switch spo2MeasurementState {
+            case .complete:
+                logEvent("Sync: SpO2 done — \(lastSpO2.map { "\($0)%" } ?? "?")")
+                return
+            case .timeout, .idle:
+                logEvent("Sync: SpO2 ended (state: \(spo2MeasurementState))")
+                return
+            default: break
+            }
+            try? await Task.sleep(for: .milliseconds(500))
+        }
+        logEvent("Sync: SpO2 deadline exceeded")
+        stopSpO2Measurement()
+    }
+
+    // MARK: - Background sync
+
+    func scheduleBackgroundSync() {
+        guard autoSyncEnabled else { return }
+        let request = BGAppRefreshTaskRequest(identifier: Self.bgSyncTaskIdentifier)
+        request.earliestBeginDate = Date(timeIntervalSinceNow: backgroundSyncInterval.seconds)
+        do {
+            try BGTaskScheduler.shared.submit(request)
+            logEvent("Background sync: scheduled in \(backgroundSyncInterval.label)")
+        } catch {
+            logEvent("Background sync: scheduling failed — \(error.localizedDescription)")
+        }
+    }
+
+    func handleBackgroundSync(task: BGAppRefreshTask) {
+        logEvent("Background sync: task received")
+        scheduleBackgroundSync()
+
+        let bgSyncTask = Task { @MainActor [weak self] in
+            await self?.runSyncSession()
+            task.setTaskCompleted(success: true)
+        }
+
+        task.expirationHandler = {
+            bgSyncTask.cancel()
+            task.setTaskCompleted(success: false)
         }
     }
 }
@@ -1129,6 +1421,20 @@ final class BluetoothManager: NSObject {
 // MARK: - CBCentralManagerDelegate
 
 extension BluetoothManager: CBCentralManagerDelegate {
+    nonisolated func centralManager(_ central: CBCentralManager, willRestoreState dict: [String: Any]) {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            logEvent("CoreBluetooth: state restored")
+            if let peripherals = dict[CBCentralManagerRestoredStatePeripheralsKey] as? [CBPeripheral] {
+                for p in peripherals {
+                    p.delegate = self
+                    connectedPeripheral = p
+                    logEvent("Restored peripheral: \(p.name ?? String(p.identifier.uuidString.prefix(8)))")
+                }
+            }
+        }
+    }
+
     nonisolated func centralManagerDidUpdateState(_ central: CBCentralManager) {
         let state = central.state
         Task { @MainActor [weak self] in
@@ -1136,6 +1442,8 @@ extension BluetoothManager: CBCentralManagerDelegate {
             centralState = state
             switch state {
             case .poweredOn:
+                print("[BLE] Bluetooth powered on")
+                logEvent("Bluetooth powered on")
                 attemptAutoConnect()
             case .poweredOff:   statusMessage = "Bluetooth is off."
             case .unauthorized: statusMessage = "Bluetooth permission denied."
@@ -1191,6 +1499,7 @@ extension BluetoothManager: CBCentralManagerDelegate {
             connectionState = .connected
             measurementState = .idle
             bpMeasurementState = .idle
+            bpTimeoutReason = nil
             bpLivePoints.removeAll()
             spo2MeasurementState = .idle
             isAutoConnecting = false
@@ -1211,7 +1520,6 @@ extension BluetoothManager: CBCentralManagerDelegate {
                                 charUUID: peripheral.name ?? peripheral.identifier.uuidString,
                                 hexBytes: "", byteCount: 0)
             peripheral.discoverServices(nil)
-            if autoHREnabled { startScheduler() }
         }
     }
 
@@ -1241,13 +1549,13 @@ extension BluetoothManager: CBCentralManagerDelegate {
         Task { @MainActor [weak self] in
             guard let self else { return }
             stopKeepAlive()
-            stopScheduler()
             measurementTask?.cancel()
             measurementTask = nil
             measurementState = .idle
             bpMeasurementTask?.cancel()
             bpMeasurementTask = nil
             bpMeasurementState = .idle
+            bpTimeoutReason = nil
             spo2MeasurementTask?.cancel()
             spo2MeasurementTask = nil
             spo2MeasurementState = .idle
