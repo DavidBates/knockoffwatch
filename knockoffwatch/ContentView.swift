@@ -214,8 +214,10 @@ struct ContentView: View {
             if isConnected {
                 if bluetooth.isSyncSessionActive {
                     Label("Auto Health Sync is running", systemImage: "arrow.triangle.2.circlepath")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .font(.caption).foregroundStyle(.secondary)
+                } else if bluetooth.idleMonitorActive {
+                    Label("Idle Monitor is running", systemImage: "antenna.radiowaves.left.and.right")
+                        .font(.caption).foregroundStyle(.secondary)
                 } else {
                     measurementControls
                 }
@@ -347,8 +349,10 @@ struct ContentView: View {
             if isConnected {
                 if bluetooth.isSyncSessionActive {
                     Label("Auto Health Sync is running", systemImage: "arrow.triangle.2.circlepath")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .font(.caption).foregroundStyle(.secondary)
+                } else if bluetooth.idleMonitorActive {
+                    Label("Idle Monitor is running", systemImage: "antenna.radiowaves.left.and.right")
+                        .font(.caption).foregroundStyle(.secondary)
                 } else {
                     bpControls
                 }
@@ -472,8 +476,10 @@ struct ContentView: View {
             if isConnected {
                 if bluetooth.isSyncSessionActive {
                     Label("Auto Health Sync is running", systemImage: "arrow.triangle.2.circlepath")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .font(.caption).foregroundStyle(.secondary)
+                } else if bluetooth.idleMonitorActive {
+                    Label("Idle Monitor is running", systemImage: "antenna.radiowaves.left.and.right")
+                        .font(.caption).foregroundStyle(.secondary)
                 } else {
                     spo2Controls
                 }
@@ -726,6 +732,38 @@ struct ContentView: View {
                         .foregroundStyle(.green)
                 }
             }
+            NavigationLink {
+                IdleMonitorView(bluetooth: bluetooth)
+            } label: {
+                Label {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Idle BLE Monitor")
+                        Text(bluetooth.idleMonitorActive
+                             ? "Monitoring — \(bluetooth.idleMonitorTotalNotifications) packets"
+                             : "Passive packet logger")
+                            .font(.caption)
+                            .foregroundStyle(bluetooth.idleMonitorActive ? .green : .secondary)
+                    }
+                } icon: {
+                    Image(systemName: "antenna.radiowaves.left.and.right")
+                        .foregroundStyle(.orange)
+                }
+            }
+            NavigationLink {
+                AdvertisementMonitorView(bluetooth: bluetooth)
+            } label: {
+                Label {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Advertisement Monitor")
+                        Text("\(bluetooth.peripherals.count) device(s) seen")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                } icon: {
+                    Image(systemName: "dot.radiowaves.left.and.right")
+                        .foregroundStyle(.cyan)
+                }
+            }
         }
     }
 
@@ -940,7 +978,17 @@ struct PeripheralRow: View {
     var body: some View {
         HStack(alignment: .center) {
             VStack(alignment: .leading, spacing: 2) {
-                Text(entry.name).font(.headline)
+                HStack(spacing: 6) {
+                    Text(entry.name).font(.headline)
+                    if entry.confidence > 0 {
+                        Text("\(entry.confidence)%")
+                            .font(.caption2.bold())
+                            .padding(.horizontal, 4).padding(.vertical, 1)
+                            .background(confidenceColor(entry.confidence).opacity(0.15))
+                            .foregroundStyle(confidenceColor(entry.confidence))
+                            .clipShape(Capsule())
+                    }
+                }
                 Text(entry.id.uuidString)
                     .font(.caption2.monospaced())
                     .foregroundStyle(.secondary)
@@ -952,6 +1000,7 @@ struct PeripheralRow: View {
             Spacer()
             VStack(alignment: .trailing, spacing: 4) {
                 Text("\(entry.rssi) dBm").font(.caption2).foregroundStyle(.secondary)
+                Text("\(entry.seenCount)×").font(.caption2).foregroundStyle(.tertiary)
                 Button("Connect", action: onConnect)
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
@@ -959,6 +1008,10 @@ struct PeripheralRow: View {
             }
         }
         .padding(.vertical, 2)
+    }
+
+    private func confidenceColor(_ confidence: Int) -> Color {
+        confidence >= 70 ? .green : confidence >= 40 ? .blue : .gray
     }
 }
 

@@ -97,9 +97,50 @@ enum ConnectionState {
 struct DiscoveredPeripheral: Identifiable {
     let id: UUID
     let peripheral: CBPeripheral
-    let name: String
+    let advertisedName: String?
+    let peripheralName: String?
     var rssi: Int
-    var advertisementSummary: String
+    var advertisedServiceUUIDs: [CBUUID]
+    var manufacturerData: Data?
+    var txPower: Int?
+    var isConnectable: Bool
+    var confidence: Int
+    var seenCount: Int
+    let firstSeen: Date
+    var lastSeen: Date
+
+    var name: String {
+        if let adv = advertisedName, !adv.isEmpty { return adv }
+        if let per = peripheralName, !per.isEmpty { return per }
+        return "Unknown BLE Device"
+    }
+
+    var manufacturerDataHex: String? {
+        manufacturerData.map { CharacteristicInfo.toHex($0) }
+    }
+
+    var advertisementSummary: String {
+        var parts: [String] = []
+        if !advertisedServiceUUIDs.isEmpty {
+            parts.append("services: " + advertisedServiceUUIDs.map { uuid in
+                let s = uuid.uuidString
+                return s.count == 4 ? s : String(s.suffix(8))
+            }.joined(separator: ", "))
+        }
+        if let mfr = manufacturerData, !mfr.isEmpty {
+            parts.append("mfr: " + mfr.prefix(4).map { String(format: "%02X", $0) }.joined())
+        }
+        if let tx = txPower { parts.append("tx: \(tx) dBm") }
+        return parts.isEmpty ? "—" : parts.joined(separator: " | ")
+    }
+}
+
+struct TrustedWatch: Codable {
+    var identifier: String
+    var serviceUUIDs: [String]
+    var manufacturerDataPrefix: Data?
+    var lastKnownName: String?
+    var lastConnectedDate: Date
 }
 
 enum KeepAliveMode: Equatable {
@@ -232,6 +273,80 @@ enum SpO2MeasurementState: Equatable {
     }
 }
 
+// MARK: - Idle Monitor Types
+
+struct IdleMonitorEvent: Identifiable {
+    struct NotificationPayload {
+        let charUUID: String
+        let serviceUUID: String
+        let data: Data
+        let decodedLabel: String?
+        let decodedDetail: String?
+        var byteCount: Int { data.count }
+        var hexString: String { CharacteristicInfo.toHex(data) }
+        var utf8String: String? {
+            guard let s = String(data: data, encoding: .utf8),
+                  !s.trimmingCharacters(in: .controlCharacters).isEmpty else { return nil }
+            return s
+        }
+    }
+
+    enum Kind {
+        case started
+        case stopped
+        case connected(name: String)
+        case disconnected(reason: String?)
+        case subscribed(charUUID: String)
+        case notification(NotificationPayload)
+        case readResponse(charUUID: String, data: Data)
+        case keepalive(batteryLevel: Int)
+        case lifecycle(String)
+        case appError(String)
+    }
+
+    let id = UUID()
+    let timestamp: Date
+    let elapsedMS: Int
+    let kind: Kind
+
+    var label: String {
+        switch kind {
+        case .started:                        return "Monitor started"
+        case .stopped:                        return "Monitor stopped"
+        case .connected(let n):               return "Connected: \(n)"
+        case .disconnected(.some(let r)):     return "Disconnected: \(r)"
+        case .disconnected(.none):            return "Disconnected (clean)"
+        case .subscribed(let u):              return "Subscribed: \(String(u.prefix(8)))…"
+        case .notification(let p):
+            let tag = p.decodedLabel.map { " [\($0)]" } ?? ""
+            return "NOTIFY \(String(p.charUUID.prefix(8)))… \(p.byteCount)B\(tag)"
+        case .readResponse(let u, let d):     return "READ \(String(u.prefix(8)))… \(d.count)B"
+        case .keepalive(let l):               return "Keepalive: battery \(l)% (app-generated)"
+        case .lifecycle(let e):               return e
+        case .appError(let m):                return "Error: \(m)"
+        }
+    }
+}
+
+struct PacketSignature: Identifiable {
+    let id: String
+    var count: Int = 0
+    private(set) var timestamps: [Date] = []
+
+    mutating func record(at date: Date) {
+        count += 1
+        timestamps.append(date)
+        if timestamps.count > 200 { timestamps.removeFirst() }
+    }
+
+    var averageIntervalSeconds: Double? {
+        guard timestamps.count >= 2 else { return nil }
+        return timestamps.last!.timeIntervalSince(timestamps.first!) / Double(timestamps.count - 1)
+    }
+
+    var lastSeen: Date? { timestamps.last }
+}
+
 // Classification of a received DF 00 11 UART notification by byte[6].
 private enum UARTPacketKind {
     case heartRateResult(bpm: Int)
@@ -307,6 +422,7 @@ final class BluetoothManager: NSObject {
     // Auto-connect
     private(set) var isAutoConnecting: Bool = false
     private(set) var savedWatchName: String? = nil
+    private(set) var savedTrustedWatch: TrustedWatch? = nil
 
     // Auto Health Sync
     private(set) var autoSyncEnabled: Bool = false
@@ -316,6 +432,17 @@ final class BluetoothManager: NSObject {
     private(set) var lastSyncTime: Date? = nil
     private(set) var lastSyncError: String? = nil
     private(set) var nextSyncTime: Date? = nil
+
+    // Idle Monitor
+    private(set) var idleMonitorActive: Bool = false
+    private(set) var idleMonitorEvents: [IdleMonitorEvent] = []
+    private(set) var idleMonitorSignatures: [PacketSignature] = []
+    private(set) var idleMonitorKeepAlive: Bool = false
+    private(set) var keepScreenAwake: Bool = false
+    private(set) var idleMonitorTotalNotifications: Int = 0
+    private(set) var idleMonitorDisconnectCount: Int = 0
+    private(set) var idleMonitorReconnectCount: Int = 0
+    private(set) var idleMonitorLastPacketTime: Date? = nil
 
     private(set) var keepAliveMode: KeepAliveMode = .none
     var keepAliveIntervalSeconds: Double = 5.0
@@ -337,6 +464,9 @@ final class BluetoothManager: NSObject {
     private var spo2MeasurementTask: Task<Void, Never>?
     private var schedulerTask: Task<Void, Never>?
     private var syncTask: Task<Void, Never>?
+    private var idleMonitorStartTime: Date? = nil
+    private var idleMonitorSignatureIndex: [String: Int] = [:]
+    private var idleMonitorKeepaliveTask: Task<Void, Never>? = nil
     private var sessionStartTime: Date?
     private var lastWriteByPair: [String: (time: Date, hex: String)] = [:]
 
@@ -359,9 +489,11 @@ final class BluetoothManager: NSObject {
     private static let spo2CmdAck       = Data([0xFD, 0x00, 0x05, 0x2B, 0x02, 0x1C, 0x00, 0x0A, 0x01])
     private static let spo2AckResult    = Data([0xFD, 0x00, 0x05, 0x2B, 0x05, 0x0E, 0x00, 0x15, 0x01])
 
-    private static let savedWatchUUIDKey          = "knockoff.savedWatchUUID"
-    private static let savedWatchNameKey          = "knockoff.savedWatchName"
-    private static let autoSyncEnabledKey         = "knockoff.autoSyncEnabled"
+    private static let savedWatchUUIDKey            = "knockoff.savedWatchUUID"
+    private static let savedWatchNameKey            = "knockoff.savedWatchName"
+    private static let trustedWatchKey              = "knockoff.trustedWatch"
+    private static let autoSyncEnabledKey           = "knockoff.autoSyncEnabled"
+    private static let autoConnectConfidenceThreshold = 55
     private static let foregroundSyncIntervalKey  = "knockoff.foregroundSyncInterval"
     private static let backgroundSyncIntervalKey  = "knockoff.backgroundSyncInterval"
 
@@ -418,6 +550,10 @@ final class BluetoothManager: NSObject {
         let rawBg = UserDefaults.standard.integer(forKey: Self.backgroundSyncIntervalKey)
         backgroundSyncInterval = BackgroundSyncInterval(rawValue: rawBg) ?? .thirtyMinutes
         savedWatchName = UserDefaults.standard.string(forKey: Self.savedWatchNameKey)
+        if let data = UserDefaults.standard.data(forKey: Self.trustedWatchKey),
+           let tw = try? JSONDecoder().decode(TrustedWatch.self, from: data) {
+            savedTrustedWatch = tw
+        }
     }
 
     // MARK: - Public API
@@ -490,7 +626,11 @@ final class BluetoothManager: NSObject {
         if central.isScanning { central.stopScan() }
         UserDefaults.standard.removeObject(forKey: Self.savedWatchUUIDKey)
         UserDefaults.standard.removeObject(forKey: Self.savedWatchNameKey)
+        UserDefaults.standard.removeObject(forKey: Self.trustedWatchKey)
         savedWatchName = nil
+        savedTrustedWatch = nil
+        connectedDeviceName = nil
+        peripherals.removeAll()
         stopForegroundScheduler()
         statusMessage = "Watch forgotten. Tap Scan to find a new device."
         logEvent("Saved watch forgotten")
@@ -1170,6 +1310,44 @@ final class BluetoothManager: NSObject {
 
     // MARK: - Auto-connect
 
+    private func computeConfidence(
+        id: UUID,
+        advertisedName: String?,
+        peripheralName: String?,
+        advertisedServiceUUIDs: [CBUUID],
+        manufacturerData: Data?
+    ) -> Int {
+        var score = 0
+        // Nordic UART service = strong watch signal
+        if advertisedServiceUUIDs.contains(where: { $0.uuidString.uppercased().hasPrefix("6E400001") }) { score += 40 }
+        // FFxx proprietary services common to these watches
+        if advertisedServiceUUIDs.contains(where: { Self.isFFxxUUID($0) }) { score += 20 }
+        if let tw = savedTrustedWatch {
+            // Identifier match (same UUID = same device)
+            if tw.identifier == id.uuidString { score += 25 }
+            // Manufacturer data prefix match
+            if let prefix = tw.manufacturerDataPrefix, !prefix.isEmpty,
+               let mfr = manufacturerData, mfr.count >= prefix.count,
+               mfr.prefix(prefix.count) == prefix { score += 20 }
+            // Name match
+            let displayName = advertisedName ?? peripheralName ?? ""
+            if let knownName = tw.lastKnownName, !knownName.isEmpty, !displayName.isEmpty,
+               displayName.localizedCaseInsensitiveContains(knownName) { score += 10 }
+            // Advertised service UUID overlap with previously discovered services
+            if !tw.serviceUUIDs.isEmpty {
+                let knownSet = Set(tw.serviceUUIDs.map { $0.uppercased() })
+                let hasOverlap = advertisedServiceUUIDs.contains { knownSet.contains($0.uuidString.uppercased()) }
+                if hasOverlap { score += 15 }
+            }
+        }
+        return min(score, 100)
+    }
+
+    private static func isFFxxUUID(_ uuid: CBUUID) -> Bool {
+        let s = uuid.uuidString.uppercased()
+        return s.count == 4 && s.hasPrefix("FF")
+    }
+
     private var savedWatchUUID: UUID? {
         UserDefaults.standard.string(forKey: Self.savedWatchUUIDKey)
             .flatMap { UUID(uuidString: $0) }
@@ -1418,6 +1596,226 @@ final class BluetoothManager: NSObject {
     }
 }
 
+// MARK: - Idle Monitor
+
+extension BluetoothManager {
+    func startIdleMonitor() {
+        guard !idleMonitorActive else { return }
+        if measurementState.isActive { stopHeartRateMeasurement() }
+        if bpMeasurementState.isActive { stopBPMeasurement() }
+        if spo2MeasurementState.isActive { stopSpO2Measurement() }
+        if isSyncSessionActive { syncTask?.cancel(); syncTask = nil; syncSessionState = .idle }
+        if autoSyncEnabled { stopForegroundScheduler() }
+
+        idleMonitorActive = true
+        idleMonitorEvents.removeAll()
+        idleMonitorSignatures.removeAll()
+        idleMonitorSignatureIndex.removeAll()
+        idleMonitorTotalNotifications = 0
+        idleMonitorDisconnectCount = 0
+        idleMonitorReconnectCount = 0
+        idleMonitorLastPacketTime = nil
+        let now = Date()
+        idleMonitorStartTime = now
+
+        logIdleEvent(.started, at: now)
+
+        if case .connected = connectionState {
+            logIdleEvent(.lifecycle("Already connected — subscribing to all notify characteristics"), at: now)
+            subscribeAllForIdleMonitor()
+        } else {
+            logIdleEvent(.lifecycle("Connecting to watch…"), at: now)
+            attemptAutoConnect()
+        }
+
+        if idleMonitorKeepAlive { startIdleKeepaliveTask() }
+        logEvent("Idle Monitor: started")
+    }
+
+    func stopIdleMonitor() {
+        guard idleMonitorActive else { return }
+        idleMonitorActive = false
+        idleMonitorKeepaliveTask?.cancel()
+        idleMonitorKeepaliveTask = nil
+        logIdleEvent(.stopped)
+        if autoSyncEnabled { startForegroundScheduler() }
+        logEvent("Idle Monitor: stopped")
+    }
+
+    func clearIdleMonitorLog() {
+        idleMonitorEvents.removeAll()
+        idleMonitorSignatures.removeAll()
+        idleMonitorSignatureIndex.removeAll()
+        idleMonitorTotalNotifications = 0
+        idleMonitorLastPacketTime = nil
+        logEvent("Idle Monitor: log cleared")
+    }
+
+    func setIdleMonitorKeepAlive(_ enabled: Bool) {
+        idleMonitorKeepAlive = enabled
+        guard idleMonitorActive else { return }
+        if enabled { startIdleKeepaliveTask() } else {
+            idleMonitorKeepaliveTask?.cancel()
+            idleMonitorKeepaliveTask = nil
+        }
+    }
+
+    func setKeepScreenAwake(_ enabled: Bool) {
+        keepScreenAwake = enabled
+    }
+
+    var idleMonitorDuration: TimeInterval {
+        guard let start = idleMonitorStartTime else { return 0 }
+        return Date().timeIntervalSince(start)
+    }
+
+    var idleMonitorTimeSinceLastPacket: TimeInterval? {
+        idleMonitorLastPacketTime.map { Date().timeIntervalSince($0) }
+    }
+
+    func notificationsByCharacteristic() -> [(charUUID: String, count: Int)] {
+        var counts: [String: Int] = [:]
+        for event in idleMonitorEvents {
+            if case .notification(let p) = event.kind { counts[p.charUUID, default: 0] += 1 }
+        }
+        return counts.sorted { $0.value > $1.value }.map { ($0.key, $0.value) }
+    }
+
+    func exportIdleMonitorJSON() -> String {
+        let iso = ISO8601DateFormatter()
+        iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let events: [[String: Any]] = idleMonitorEvents.map { event in
+            var dict: [String: Any] = [
+                "timestamp": iso.string(from: event.timestamp),
+                "elapsedMS": event.elapsedMS,
+                "type": idleEventTypeLabel(event.kind),
+                "label": event.label
+            ]
+            switch event.kind {
+            case .notification(let p):
+                dict["charUUID"] = p.charUUID; dict["serviceUUID"] = p.serviceUUID
+                dict["byteCount"] = p.byteCount; dict["hex"] = p.hexString
+                if let v = p.utf8String  { dict["utf8"] = v }
+                if let v = p.decodedLabel  { dict["decoded"] = v }
+                if let v = p.decodedDetail { dict["decodedDetail"] = v }
+            case .readResponse(let u, let d): dict["charUUID"] = u; dict["hex"] = CharacteristicInfo.toHex(d)
+            default: break
+            }
+            return dict
+        }
+        let sigs: [[String: Any]] = idleMonitorSignatures.sorted { $0.count > $1.count }.map { sig in
+            var d: [String: Any] = ["signature": sig.id, "count": sig.count]
+            if let avg = sig.averageIntervalSeconds { d["avgIntervalSeconds"] = (avg * 10).rounded() / 10 }
+            if let last = sig.lastSeen { d["lastSeen"] = iso.string(from: last) }
+            return d
+        }
+        let byChar = notificationsByCharacteristic().map { ["charUUID": $0.charUUID, "count": $0.count] }
+        let root: [String: Any] = [
+            "device": connectedPeripheral?.name ?? connectedDeviceName ?? "unknown",
+            "deviceIdentifier": connectedPeripheral?.identifier.uuidString ?? "unknown",
+            "monitorStart": idleMonitorStartTime.map { iso.string(from: $0) } ?? "—",
+            "monitorEnd": iso.string(from: Date()),
+            "totalNotifications": idleMonitorTotalNotifications,
+            "disconnectCount": idleMonitorDisconnectCount,
+            "reconnectCount": idleMonitorReconnectCount,
+            "notificationsByCharacteristic": byChar,
+            "packetSignatures": sigs,
+            "events": events
+        ]
+        do {
+            let data = try JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys])
+            return String(data: data, encoding: .utf8) ?? "{}"
+        } catch { return "{\"error\": \"\(error.localizedDescription)\"}" }
+    }
+
+    private func idleEventTypeLabel(_ kind: IdleMonitorEvent.Kind) -> String {
+        switch kind {
+        case .started:       return "started"
+        case .stopped:       return "stopped"
+        case .connected:     return "connected"
+        case .disconnected:  return "disconnected"
+        case .subscribed:    return "subscribed"
+        case .notification:  return "notification"
+        case .readResponse:  return "readResponse"
+        case .keepalive:     return "keepalive"
+        case .lifecycle:     return "lifecycle"
+        case .appError:      return "error"
+        }
+    }
+
+    func logIdleEvent(_ kind: IdleMonitorEvent.Kind, at timestamp: Date = Date()) {
+        let elapsedMS = idleMonitorStartTime.map { Int(timestamp.timeIntervalSince($0) * 1000) } ?? 0
+        let event = IdleMonitorEvent(timestamp: timestamp, elapsedMS: elapsedMS, kind: kind)
+        idleMonitorEvents.append(event)
+        if idleMonitorEvents.count > 2000 { idleMonitorEvents.removeFirst(idleMonitorEvents.count - 2000) }
+    }
+
+    func recordIdleNotification(charUUID: String, serviceUUID: String, data: Data) {
+        let now = Date()
+        idleMonitorTotalNotifications += 1
+        idleMonitorLastPacketTime = now
+        let (label, detail) = decodeIdlePacket(data)
+        let payload = IdleMonitorEvent.NotificationPayload(
+            charUUID: charUUID, serviceUUID: serviceUUID, data: data,
+            decodedLabel: label, decodedDetail: detail
+        )
+        logIdleEvent(.notification(payload), at: now)
+        guard data.count >= 8 else { return }
+        let sigKey = data.prefix(8).map { String(format: "%02X", $0) }.joined(separator: " ")
+        if let idx = idleMonitorSignatureIndex[sigKey] {
+            var sig = idleMonitorSignatures[idx]
+            sig.record(at: now)
+            idleMonitorSignatures[idx] = sig
+        } else {
+            var sig = PacketSignature(id: sigKey)
+            sig.record(at: now)
+            idleMonitorSignatureIndex[sigKey] = idleMonitorSignatures.count
+            idleMonitorSignatures.append(sig)
+        }
+    }
+
+    private func decodeIdlePacket(_ data: Data) -> (label: String?, detail: String?) {
+        guard !data.isEmpty else { return (nil, nil) }
+        if data.first == 0xFD { return ("ack/status", nil) }
+        guard data.count == 21, data[0] == 0xDF, data[1] == 0x00, data[2] == 0x11 else { return (nil, nil) }
+        switch data[6] {
+        case 0x04: return ("heartRateResult",       "bpm=\(data[20])")
+        case 0x05: return ("bloodPressureResult",   "\(data[19])/\(data[20]) mmHg")
+        case 0x0E: return ("spO2Result",            "\(data[20])%")
+        case 0x02: return ("bloodPressureLiveData", nil)
+        case 0x0C: return ("hrLiveSensor",          nil)
+        default:   return (String(format: "unknownType_0x%02X", data[6]), nil)
+        }
+    }
+
+    private func subscribeAllForIdleMonitor() {
+        guard let peripheral = connectedPeripheral else { return }
+        var count = 0
+        for char in discoveredCharacteristics {
+            guard char.properties.contains(.notify) || char.properties.contains(.indicate) else { continue }
+            if !char.isNotifying { peripheral.setNotifyValue(true, for: char); count += 1 }
+        }
+        logEvent("Idle Monitor: requested notify on \(count) characteristic(s)")
+    }
+
+    private func startIdleKeepaliveTask() {
+        idleMonitorKeepaliveTask?.cancel()
+        idleMonitorKeepaliveTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(60))
+                guard !Task.isCancelled, let self, self.idleMonitorActive, self.idleMonitorKeepAlive else { break }
+                guard let peripheral = self.connectedPeripheral,
+                      let char = self.batteryLevelChar, char.properties.contains(.read) else {
+                    self.logIdleEvent(.appError("Keepalive: battery char unavailable"))
+                    continue
+                }
+                self.logEvent("Idle Monitor: battery keepalive read (app-generated)")
+                peripheral.readValue(for: char)
+            }
+        }
+    }
+}
+
 // MARK: - CBCentralManagerDelegate
 
 extension BluetoothManager: CBCentralManagerDelegate {
@@ -1461,29 +1859,60 @@ extension BluetoothManager: CBCentralManagerDelegate {
     ) {
         let id = peripheral.identifier
         let rssiValue = RSSI.intValue
-        let name = peripheral.name
-            ?? advertisementData[CBAdvertisementDataLocalNameKey] as? String
-            ?? "Unknown"
-        let summary = Self.formatAdvertisementData(advertisementData)
+        let advertisedName = advertisementData[CBAdvertisementDataLocalNameKey] as? String
+        let peripheralName = peripheral.name
+        let advertisedServiceUUIDs = advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID] ?? []
+        let manufacturerData = advertisementData[CBAdvertisementDataManufacturerDataKey] as? Data
+        let txPower = advertisementData[CBAdvertisementDataTxPowerLevelKey] as? Int
+        let isConnectable = advertisementData[CBAdvertisementDataIsConnectable] as? Bool ?? true
         Task { @MainActor [weak self] in
             guard let self else { return }
+            let confidence = computeConfidence(
+                id: id, advertisedName: advertisedName, peripheralName: peripheralName,
+                advertisedServiceUUIDs: advertisedServiceUUIDs, manufacturerData: manufacturerData
+            )
+            let now = Date()
             if let idx = peripherals.firstIndex(where: { $0.id == id }) {
                 peripherals[idx].rssi = rssiValue
+                peripherals[idx].advertisedServiceUUIDs = advertisedServiceUUIDs
+                if let mfr = manufacturerData { peripherals[idx].manufacturerData = mfr }
+                if let tx = txPower { peripherals[idx].txPower = tx }
+                peripherals[idx].isConnectable = isConnectable
+                peripherals[idx].confidence = confidence
+                peripherals[idx].seenCount += 1
+                peripherals[idx].lastSeen = now
             } else {
                 peripherals.append(DiscoveredPeripheral(
                     id: id, peripheral: peripheral,
-                    name: name, rssi: rssiValue, advertisementSummary: summary
+                    advertisedName: advertisedName, peripheralName: peripheralName,
+                    rssi: rssiValue,
+                    advertisedServiceUUIDs: advertisedServiceUUIDs,
+                    manufacturerData: manufacturerData,
+                    txPower: txPower,
+                    isConnectable: isConnectable,
+                    confidence: confidence,
+                    seenCount: 1,
+                    firstSeen: now,
+                    lastSeen: now
                 ))
-                peripherals.sort {
-                    if $0.name == "Unknown" { return false }
-                    if $1.name == "Unknown" { return true }
-                    return $0.name < $1.name
-                }
             }
-            if isAutoConnecting, let savedUUID = savedWatchUUID, id == savedUUID {
-                logEvent("Auto-connect: found target via scan")
-                central.stopScan()
-                autoConnectTo(peripheral)
+            peripherals.sort { a, b in
+                let aUnknown = a.name == "Unknown BLE Device"
+                let bUnknown = b.name == "Unknown BLE Device"
+                if aUnknown != bUnknown { return bUnknown }
+                if a.confidence != b.confidence { return a.confidence > b.confidence }
+                return a.name.localizedCompare(b.name) == .orderedAscending
+            }
+            if isAutoConnecting {
+                if let savedUUID = savedWatchUUID, id == savedUUID {
+                    logEvent("Auto-connect: found target via scan (UUID match)")
+                    central.stopScan()
+                    autoConnectTo(peripheral)
+                } else if savedTrustedWatch != nil, confidence >= Self.autoConnectConfidenceThreshold {
+                    logEvent("Auto-connect: found likely target via fingerprint (confidence: \(confidence)%)")
+                    central.stopScan()
+                    autoConnectTo(peripheral)
+                }
             }
         }
     }
@@ -1508,6 +1937,20 @@ extension BluetoothManager: CBCentralManagerDelegate {
                 UserDefaults.standard.set(name, forKey: Self.savedWatchNameKey)
                 savedWatchName = name
             }
+            // Save/update TrustedWatch fingerprint for future reconnection after UUID changes
+            let entry = peripherals.first(where: { $0.id == peripheral.identifier })
+            let mfrPrefix = entry?.manufacturerData.map { Data($0.prefix(4)) }
+            let tw = TrustedWatch(
+                identifier: peripheral.identifier.uuidString,
+                serviceUUIDs: entry?.advertisedServiceUUIDs.map { $0.uuidString } ?? [],
+                manufacturerDataPrefix: mfrPrefix,
+                lastKnownName: peripheral.name ?? entry?.advertisedName,
+                lastConnectedDate: now
+            )
+            savedTrustedWatch = tw
+            if let encoded = try? JSONEncoder().encode(tw) {
+                UserDefaults.standard.set(encoded, forKey: Self.trustedWatchKey)
+            }
             discoveredServices.removeAll()
             discoveredCharacteristics.removeAll()
             characteristicInfos.removeAll()
@@ -1520,6 +1963,10 @@ extension BluetoothManager: CBCentralManagerDelegate {
                                 charUUID: peripheral.name ?? peripheral.identifier.uuidString,
                                 hexBytes: "", byteCount: 0)
             peripheral.discoverServices(nil)
+            if self.idleMonitorActive {
+                self.logIdleEvent(.connected(name: peripheral.name ?? "unknown"))
+                if self.idleMonitorDisconnectCount > 0 { self.idleMonitorReconnectCount += 1 }
+            }
         }
     }
 
@@ -1578,6 +2025,10 @@ extension BluetoothManager: CBCentralManagerDelegate {
             statusMessage = hasError
                 ? "Disconnected (\(durationStr)): \(reason)"
                 : "Disconnected after \(durationStr)."
+            if self.idleMonitorActive {
+                self.logIdleEvent(.disconnected(reason: hasError ? reason : nil))
+                self.idleMonitorDisconnectCount += 1
+            }
         }
     }
 }
@@ -1597,6 +2048,15 @@ extension BluetoothManager: CBPeripheralDelegate {
             }
             discoveredServices = services
             logEvent("Services (\(services.count)): \(services.map(\.uuid.uuidString).joined(separator: ", "))")
+            if var tw = savedTrustedWatch {
+                let merged = Array(Set(tw.serviceUUIDs + services.map { $0.uuid.uuidString }))
+                tw.serviceUUIDs = merged
+                tw.lastConnectedDate = Date()
+                savedTrustedWatch = tw
+                if let encoded = try? JSONEncoder().encode(tw) {
+                    UserDefaults.standard.set(encoded, forKey: Self.trustedWatchKey)
+                }
+            }
             for service in services { peripheral.discoverCharacteristics(nil, for: service) }
         }
     }
@@ -1666,6 +2126,13 @@ extension BluetoothManager: CBPeripheralDelegate {
                     logEvent("Heart rate write: found (\(char.uuid.uuidString))")
                 }
             }
+            if self.idleMonitorActive {
+                for char in chars {
+                    guard char.properties.contains(.notify) || char.properties.contains(.indicate),
+                          !char.isNotifying else { continue }
+                    peripheral.setNotifyValue(true, for: char)
+                }
+            }
         }
     }
 
@@ -1707,6 +2174,17 @@ extension BluetoothManager: CBPeripheralDelegate {
                     logEvent("Value (\(uuid)): \(hex)\(utf8)")
                 }
                 recordValueUpdate(uuid: uuid, data: d, isNotifying: isNotifying)
+                if self.idleMonitorActive {
+                    let serviceUUID = self.characteristicInfos
+                        .first(where: { $0.charUUID == uuid })?.serviceUUID.uuidString ?? "unknown"
+                    if isNotifying {
+                        self.recordIdleNotification(charUUID: uuid.uuidString, serviceUUID: serviceUUID, data: d)
+                    } else if uuid == self.batteryLevelUUID, let level = d.first.map({ Int($0) }) {
+                        self.logIdleEvent(.keepalive(batteryLevel: level))
+                    } else {
+                        self.logIdleEvent(.readResponse(charUUID: uuid.uuidString, data: d))
+                    }
+                }
             }
         }
     }
@@ -1728,6 +2206,9 @@ extension BluetoothManager: CBPeripheralDelegate {
                     characteristicInfos[idx].isNotifying = isNotifying
                 }
                 logEvent("Notify \(isNotifying ? "ENABLED" : "disabled") for \(uuid)")
+                if self.idleMonitorActive && isNotifying {
+                    self.logIdleEvent(.subscribed(charUUID: uuid.uuidString))
+                }
             }
         }
     }

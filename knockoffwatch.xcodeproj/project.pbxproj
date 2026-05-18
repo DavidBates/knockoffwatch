@@ -11,7 +11,7 @@
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
-		C63635EC2FB2D7FA00A887A9 /* PBXFileSystemSynchronizedBuildFileExceptionSet */ = {
+		C63635EC2FB2D7FA00A887A9 /* Exceptions for "knockoffwatch" folder in "knockoffwatch" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				BackgroundConfig.plist,
@@ -25,7 +25,7 @@
 		C63635EB2FB2D7FA00A887A9 /* knockoffwatch */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			exceptions = (
-				C63635EC2FB2D7FA00A887A9 /* PBXFileSystemSynchronizedBuildFileExceptionSet */,
+				C63635EC2FB2D7FA00A887A9 /* Exceptions for "knockoffwatch" folder in "knockoffwatch" target */,
 			);
 			path = knockoffwatch;
 			sourceTree = "<group>";
