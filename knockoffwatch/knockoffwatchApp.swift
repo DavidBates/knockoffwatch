@@ -24,8 +24,22 @@ struct knockoffwatchApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            RootView()
                 .environment(bluetooth)
+        }
+    }
+}
+
+// MARK: - Root routing view
+
+private struct RootView: View {
+    @AppStorage("hasCompletedOnboarding") private var hasCompletedOnboarding = false
+
+    var body: some View {
+        if hasCompletedOnboarding {
+            MainAppView()
+        } else {
+            OnboardingView()
         }
     }
 }
