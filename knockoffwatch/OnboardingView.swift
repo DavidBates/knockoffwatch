@@ -329,3 +329,8 @@ struct OnboardingPageView: View {
         }
     }
 }
+
+#Preview("Onboarding") {
+    OnboardingView()
+        .environment(BluetoothManager())
+}

@@ -367,6 +367,7 @@ final class BluetoothManager: NSObject {
     // MARK: Observable state
 
     let healthKit = HealthKitManager()
+    let healthHistory = HealthHistoryStore()
 
     private(set) var centralState: CBManagerState = .unknown
     private(set) var peripherals: [DiscoveredPeripheral] = []
@@ -667,6 +668,41 @@ final class BluetoothManager: NSObject {
         syncTask?.cancel()
         syncTask = Task { @MainActor [weak self] in
             await self?.runSyncSession()
+        }
+    }
+
+    func syncAll() {
+        logEvent("Manual Sync All: triggered")
+        syncTask?.cancel()
+        syncTask = Task { @MainActor [weak self] in
+            await self?.runSyncForMetrics(hr: true, bp: true, spo2: true)
+        }
+    }
+
+    func syncHeartRateNow() {
+        guard !isSyncSessionActive else { return }
+        logEvent("Manual HR sync: triggered")
+        syncTask?.cancel()
+        syncTask = Task { @MainActor [weak self] in
+            await self?.runSyncForMetrics(hr: true, bp: false, spo2: false)
+        }
+    }
+
+    func syncBPNow() {
+        guard !isSyncSessionActive else { return }
+        logEvent("Manual BP sync: triggered")
+        syncTask?.cancel()
+        syncTask = Task { @MainActor [weak self] in
+            await self?.runSyncForMetrics(hr: false, bp: true, spo2: false)
+        }
+    }
+
+    func syncSpO2Now() {
+        guard !isSyncSessionActive else { return }
+        logEvent("Manual SpO2 sync: triggered")
+        syncTask?.cancel()
+        syncTask = Task { @MainActor [weak self] in
+            await self?.runSyncForMetrics(hr: false, bp: false, spo2: true)
         }
     }
 
@@ -1095,6 +1131,7 @@ final class BluetoothManager: NSObject {
                     logEvent("HR measurement: stop command sent after result")
                 }
             }
+            healthHistory.append(.heartRate(bpm, date: hrDate))
             let hk = healthKit
             Task { await hk.saveHeartRate(bpm: bpm, date: hrDate, rawPacketHex: hex) }
 
@@ -1131,6 +1168,7 @@ final class BluetoothManager: NSObject {
                 }
                 bpMeasurementState = .complete
                 logEvent("BP measurement: complete — \(sys)/\(dia) mmHg")
+                healthHistory.append(.bloodPressure(sys: sys, dia: dia, date: bpDate))
                 let hk = healthKit
                 Task { await hk.saveBloodPressure(systolic: sys, diastolic: dia, date: bpDate, rawPacketHex: hex) }
             } else {
@@ -1167,6 +1205,7 @@ final class BluetoothManager: NSObject {
                 peripheral.writeValue(Self.spo2AckResult, for: writeChar, type: .withoutResponse)
                 logEvent("SpO2 result ACK sent")
             }
+            healthHistory.append(.bloodOxygen(pct, date: spo2Date))
             let hk = healthKit
             Task { await hk.saveSpO2(percentage: pct, date: spo2Date, rawPacketHex: hex) }
 
@@ -1566,6 +1605,41 @@ final class BluetoothManager: NSObject {
         stopSpO2Measurement()
     }
 
+    private func runSyncForMetrics(hr: Bool, bp: Bool, spo2: Bool) async {
+        let wasConnected: Bool
+        if case .connected = connectionState { wasConnected = true } else { wasConnected = false }
+        syncSessionState = .connecting
+        lastSyncError = nil
+
+        guard await connectForSync(), !Task.isCancelled else {
+            if !Task.isCancelled {
+                let msg = "Could not connect to watch"
+                syncSessionState = .failed(msg)
+                lastSyncError = msg
+                logEvent("Sync: failed — \(msg)")
+            }
+            return
+        }
+
+        syncSessionState = .subscribing
+        if !wasConnected { try? await Task.sleep(for: .seconds(1)) }
+        guard !Task.isCancelled else { return }
+
+        if hr { await syncMeasureHR(timeout: 45) }
+        if bp, !Task.isCancelled { await syncMeasureBP(timeout: 60) }
+        if spo2, !Task.isCancelled { await syncMeasureSpO2(timeout: 45) }
+        guard !Task.isCancelled else { return }
+
+        if !wasConnected {
+            syncSessionState = .disconnecting
+            disconnect()
+            try? await Task.sleep(for: .seconds(2))
+        }
+        lastSyncTime = Date()
+        syncSessionState = .complete
+        logEvent("Sync done: hr=\(hr) bp=\(bp) spo2=\(spo2)")
+    }
+
     // MARK: - Background sync
 
     func scheduleBackgroundSync() {
@@ -1594,6 +1668,20 @@ final class BluetoothManager: NSObject {
             task.setTaskCompleted(success: false)
         }
     }
+
+    #if DEBUG
+    func injectPreviewState() {
+        lastHeartRate = 72
+        lastHeartRateDate = Date().addingTimeInterval(-300)
+        lastSystolic = 122
+        lastDiastolic = 78
+        lastBPDate = Date().addingTimeInterval(-600)
+        lastSpO2 = 98
+        lastSpO2Date = Date().addingTimeInterval(-180)
+        batteryLevel = 75
+        savedWatchName = "LaxasFit Watch Ultra"
+    }
+    #endif
 }
 
 // MARK: - Idle Monitor
@@ -2299,3 +2387,21 @@ private extension CBError.Code {
         }
     }
 }
+
+#if DEBUG
+extension BluetoothManager {
+    static var preview: BluetoothManager {
+        let m = BluetoothManager()
+        m.injectPreviewState()
+        let calendar = Calendar.current
+        let now = Date()
+        for i in 0..<7 {
+            guard let date = calendar.date(byAdding: .day, value: -i, to: now) else { continue }
+            m.healthHistory.append(.heartRate(Int.random(in: 62...88), date: date))
+            m.healthHistory.append(.bloodPressure(sys: Int.random(in: 112...132), dia: Int.random(in: 72...86), date: date))
+            m.healthHistory.append(.bloodOxygen(Int.random(in: 96...99), date: date))
+        }
+        return m
+    }
+}
+#endif

@@ -19,3 +19,8 @@ struct MainAppView: View {
         }
     }
 }
+
+#Preview("Main App") {
+    MainAppView()
+        .environment(BluetoothManager.preview)
+}

@@ -10,69 +10,211 @@ struct HomeView: View {
     }
 
     var body: some View {
-        List {
-            connectionSection
-            if bluetooth.batteryLevel != nil || isConnected {
-                batteryRow
+        ScrollView {
+            VStack(spacing: 14) {
+                topRow
+                healthHeader
+                HeartRateCard(bluetooth: bluetooth)
+                BloodPressureCard(bluetooth: bluetooth)
+                BloodOxygenCard(bluetooth: bluetooth)
+                syncCard
             }
-            readingsSection
-            syncSection
+            .padding(.horizontal, 16)
+            .padding(.top, 8)
+            .padding(.bottom, 24)
         }
+        .background(Color(.systemGroupedBackground))
         .navigationTitle("LaxasFit Watch")
-        .listStyle(.insetGrouped)
     }
 
-    // MARK: - Connection
+    // MARK: - Top row: connection + battery tiles
 
-    private var connectionSection: some View {
-        Section {
-            HStack(spacing: 14) {
-                ZStack {
-                    Circle()
-                        .fill(connectionColor.opacity(0.12))
-                        .frame(width: 48, height: 48)
-                    Image(systemName: "applewatch")
-                        .font(.title2)
-                        .foregroundStyle(connectionColor)
-                }
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(watchDisplayName)
-                        .font(.headline)
-                    Text(connectionStatusLabel)
-                        .font(.caption)
-                        .foregroundStyle(connectionColor)
-                }
+    private var topRow: some View {
+        HStack(spacing: 12) {
+            connectionTile
+            batteryTile
+        }
+    }
+
+    private var connectionTile: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Image(systemName: "applewatch")
+                    .font(.title3)
+                    .foregroundStyle(connectionColor)
                 Spacer()
+                Circle()
+                    .fill(connectionColor)
+                    .frame(width: 8, height: 8)
+            }
+
+            Text(watchDisplayName)
+                .font(.caption.bold())
+                .lineLimit(1)
+
+            Text(connectionStatusLabel)
+                .font(.caption2)
+                .foregroundStyle(connectionColor)
+
+            if !isConnected {
                 if case .connecting = bluetooth.connectionState {
-                    ProgressView()
+                    ProgressView().scaleEffect(0.7)
                 } else if bluetooth.isScanning {
-                    ProgressView()
-                } else if !isConnected {
-                    Button("Connect") {
-                        bluetooth.startScan()
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.small)
-                    .disabled(bluetooth.centralState != .poweredOn)
+                    Button("Stop", action: bluetooth.stopScan)
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                } else {
+                    Button("Connect") { bluetooth.startScan() }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.blue)
+                        .controlSize(.mini)
+                        .disabled(bluetooth.centralState != .poweredOn)
                 }
             }
-            .padding(.vertical, 4)
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background {
+            RoundedRectangle(cornerRadius: 18)
+                .fill(Color(.secondarySystemGroupedBackground))
+        }
+    }
 
-            // Show nearby devices while scanning so user can pick one
+    private var batteryTile: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Image(systemName: batteryIcon(bluetooth.batteryLevel ?? 100))
+                    .font(.title3)
+                    .foregroundStyle(batteryColor)
+                Spacer()
+            }
+
+            if let level = bluetooth.batteryLevel {
+                Text("\(level)%")
+                    .font(.title2.bold().monospacedDigit())
+            } else {
+                Text("—")
+                    .font(.title2.bold())
+                    .foregroundStyle(.tertiary)
+            }
+
+            Text("Watch Battery")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background {
+            RoundedRectangle(cornerRadius: 18)
+                .fill(Color(.secondarySystemGroupedBackground))
+        }
+    }
+
+    // MARK: - Health section header
+
+    private var healthHeader: some View {
+        HStack {
+            Text("Health")
+                .font(.headline)
+            Spacer()
+            if let last = latestHealthDate {
+                (Text("Updated ") + Text(last, style: .relative) + Text(" ago"))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.horizontal, 2)
+        .padding(.top, 4)
+    }
+
+    private var latestHealthDate: Date? {
+        let h = bluetooth.healthHistory
+        let dates = [
+            h.lastUpdated(ofType: .heartRate),
+            h.lastUpdated(ofType: .bloodPressure),
+            h.lastUpdated(ofType: .bloodOxygen)
+        ].compactMap { $0 }
+        return dates.max()
+    }
+
+    // MARK: - Scan list (shown while scanning)
+
+    private var scanResultsSection: some View {
+        Group {
             if bluetooth.isScanning || (!isConnected && !bluetooth.peripherals.isEmpty) {
-                ForEach(bluetooth.peripherals.prefix(5)) { entry in
-                    PeripheralRow(entry: entry, isConnectable: !isConnected) {
-                        bluetooth.connect(to: entry)
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Nearby Devices")
+                        .font(.caption.bold())
+                        .foregroundStyle(.secondary)
+                        .padding(.leading, 4)
+                    ForEach(bluetooth.peripherals.prefix(5)) { entry in
+                        PeripheralRow(entry: entry, isConnectable: !isConnected) {
+                            bluetooth.connect(to: entry)
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background {
+                            RoundedRectangle(cornerRadius: 12)
+                                .fill(Color(.secondarySystemGroupedBackground))
+                        }
                     }
-                }
-                if bluetooth.isScanning {
-                    Button("Stop Scanning", action: bluetooth.stopScan)
-                        .foregroundStyle(.orange)
-                        .font(.caption)
                 }
             }
         }
     }
+
+    // MARK: - Compact sync card
+
+    private var syncCard: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 6) {
+                Image(systemName: "arrow.triangle.2.circlepath")
+                    .foregroundStyle(.blue)
+                Text("Sync")
+                    .font(.subheadline.bold())
+                Spacer()
+                if bluetooth.isSyncSessionActive {
+                    ProgressView().scaleEffect(0.65)
+                    Text(bluetooth.syncSessionState.label)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 14)
+            .padding(.bottom, 10)
+
+            Divider().padding(.horizontal, 16)
+
+            HStack(spacing: 10) {
+                Button {
+                    bluetooth.syncAll()
+                } label: {
+                    Label("Sync All", systemImage: "arrow.triangle.2.circlepath")
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.blue)
+                .controlSize(.small)
+                .disabled(bluetooth.isSyncSessionActive)
+
+                Spacer()
+
+                if let last = bluetooth.lastSyncTime {
+                    (Text("Last: ") + Text(last, style: .relative))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+        }
+        .background {
+            RoundedRectangle(cornerRadius: 20)
+                .fill(Color(.secondarySystemGroupedBackground))
+        }
+    }
+
+    // MARK: - Helpers
 
     private var watchDisplayName: String {
         bluetooth.connectedDeviceName
@@ -93,172 +235,14 @@ struct HomeView: View {
         case .connected:       return "Connected"
         case .connecting:      return "Connecting…"
         case .failed(let msg): return "Error: \(msg)"
-        case .disconnected:    return bluetooth.savedWatchName != nil ? "Tap Connect to reconnect" : "Not connected"
+        case .disconnected:    return bluetooth.savedWatchName != nil ? "Tap Connect" : "Not paired"
         }
     }
 
-    // MARK: - Battery
-
-    private var batteryRow: some View {
-        Section {
-            if let level = bluetooth.batteryLevel {
-                HStack(spacing: 12) {
-                    Image(systemName: batteryIcon(level))
-                        .foregroundStyle(level > 20 ? .green : .red)
-                    Text("\(level)%")
-                        .font(.body.monospacedDigit())
-                    Spacer()
-                    Text("Watch Battery")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            } else {
-                HStack(spacing: 8) {
-                    ProgressView().scaleEffect(0.8)
-                    Text("Reading battery…")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-        }
+    private var batteryColor: Color {
+        guard let level = bluetooth.batteryLevel else { return .secondary }
+        return level > 20 ? .green : .red
     }
-
-    // MARK: - Latest Readings
-
-    private var readingsSection: some View {
-        Section("Latest Readings") {
-            readingRow(
-                label: "Heart Rate",
-                icon: "heart.fill",
-                iconColor: .red,
-                value: bluetooth.lastHeartRate.map { "\($0) bpm" },
-                date: bluetooth.lastHeartRateDate
-            )
-            readingRow(
-                label: "Blood Pressure",
-                icon: "waveform.path.ecg",
-                iconColor: .orange,
-                value: {
-                    if let sys = bluetooth.lastSystolic, let dia = bluetooth.lastDiastolic {
-                        return "\(sys)/\(dia) mmHg"
-                    }
-                    return nil
-                }(),
-                date: bluetooth.lastBPDate
-            )
-            readingRow(
-                label: "Blood Oxygen",
-                icon: "lungs.fill",
-                iconColor: .blue,
-                value: bluetooth.lastSpO2.map { "\($0)%" },
-                date: bluetooth.lastSpO2Date
-            )
-        }
-    }
-
-    private func readingRow(label: String, icon: String, iconColor: Color,
-                            value: String?, date: Date?) -> some View {
-        LabeledContent {
-            if let v = value {
-                VStack(alignment: .trailing, spacing: 2) {
-                    Text(v).font(.headline)
-                    if let d = date {
-                        Text(d, style: .relative)
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-            } else {
-                Text("—").foregroundStyle(.secondary)
-            }
-        } label: {
-            Label(label, systemImage: icon).foregroundStyle(iconColor)
-        }
-    }
-
-    // MARK: - Sync
-
-    private var syncSection: some View {
-        Section {
-            if bluetooth.autoSyncEnabled {
-                Button {
-                    bluetooth.triggerAutoSync()
-                } label: {
-                    HStack {
-                        Label("Sync All", systemImage: "arrow.triangle.2.circlepath")
-                        if bluetooth.isSyncSessionActive {
-                            Spacer()
-                            ProgressView().scaleEffect(0.8)
-                        }
-                    }
-                }
-                .disabled(!isConnected || bluetooth.isSyncSessionActive)
-            }
-
-            measureButton(
-                label: "Sync Heart Rate",
-                icon: "heart.fill",
-                isActive: bluetooth.measurementState.isActive,
-                disabled: !isConnected || bluetooth.measurementState.isActive
-            ) {
-                bluetooth.startHeartRateMeasurement()
-            }
-
-            measureButton(
-                label: "Sync Blood Pressure",
-                icon: "waveform.path.ecg",
-                isActive: bluetooth.bpMeasurementState.isActive,
-                disabled: !isConnected || bluetooth.bpMeasurementState.isActive
-            ) {
-                bluetooth.startBPMeasurement()
-            }
-
-            measureButton(
-                label: "Sync Blood Oxygen",
-                icon: "lungs.fill",
-                isActive: bluetooth.spo2MeasurementState.isActive,
-                disabled: !isConnected || bluetooth.spo2MeasurementState.isActive
-            ) {
-                bluetooth.startSpO2Measurement()
-            }
-
-            if bluetooth.isSyncSessionActive {
-                HStack(spacing: 8) {
-                    ProgressView().scaleEffect(0.8)
-                    Text(bluetooth.syncSessionState.label)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-
-            if let last = bluetooth.lastSyncTime {
-                LabeledContent("Last sync") {
-                    Text(last, style: .relative)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-        } header: {
-            Text("Sync")
-        }
-    }
-
-    private func measureButton(label: String, icon: String,
-                               isActive: Bool, disabled: Bool,
-                               action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            HStack {
-                Label(label, systemImage: icon)
-                if isActive {
-                    Spacer()
-                    ProgressView().scaleEffect(0.75)
-                }
-            }
-        }
-        .disabled(disabled)
-    }
-
-    // MARK: - Helpers
 
     private func batteryIcon(_ level: Int) -> String {
         switch level {
@@ -269,4 +253,18 @@ struct HomeView: View {
         default:      return "battery.0"
         }
     }
+}
+
+#Preview("Home — Connected") {
+    NavigationStack {
+        HomeView()
+    }
+    .environment(BluetoothManager.preview)
+}
+
+#Preview("Home — Disconnected") {
+    NavigationStack {
+        HomeView()
+    }
+    .environment(BluetoothManager())
 }
