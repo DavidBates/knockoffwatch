@@ -255,6 +255,7 @@ struct HomeView: View {
     }
 }
 
+#if DEBUG
 #Preview("Home — Connected") {
     NavigationStack {
         HomeView()
@@ -268,3 +269,4 @@ struct HomeView: View {
     }
     .environment(BluetoothManager())
 }
+#endif

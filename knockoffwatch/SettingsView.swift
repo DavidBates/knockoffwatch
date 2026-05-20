@@ -299,9 +299,11 @@ struct SettingsView: View {
     }
 }
 
+#if DEBUG
 #Preview("Settings") {
     NavigationStack {
         SettingsView()
     }
     .environment(BluetoothManager.preview)
 }
+#endif

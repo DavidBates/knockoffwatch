@@ -38,6 +38,7 @@ struct HeartRateCard: View {
     }
 }
 
+#if DEBUG
 #Preview("Heart Rate Card") {
     ScrollView {
         HeartRateCard(bluetooth: .preview)
@@ -45,3 +46,4 @@ struct HeartRateCard: View {
     }
     .background(Color(.systemGroupedBackground))
 }
+#endif

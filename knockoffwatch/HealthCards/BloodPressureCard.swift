@@ -50,6 +50,7 @@ struct BloodPressureCard: View {
     }
 }
 
+#if DEBUG
 #Preview("Blood Pressure Card") {
     ScrollView {
         BloodPressureCard(bluetooth: .preview)
@@ -57,3 +58,4 @@ struct BloodPressureCard: View {
     }
     .background(Color(.systemGroupedBackground))
 }
+#endif

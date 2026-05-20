@@ -20,7 +20,9 @@ struct MainAppView: View {
     }
 }
 
+#if DEBUG
 #Preview("Main App") {
     MainAppView()
         .environment(BluetoothManager.preview)
 }
+#endif
