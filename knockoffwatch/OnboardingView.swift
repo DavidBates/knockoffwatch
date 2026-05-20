@@ -32,7 +32,14 @@ struct OnboardingView: View {
             title: "Welcome to\nLaxasFit Watch",
             subtitle: "Sync your LaxasFit Watch Ultra with Apple Health and keep track of your heart rate, blood pressure, and blood oxygen.",
             buttonLabel: "Get Started",
-            action: { currentPage = 1 }
+            action: { currentPage = 1 },
+            extra: {
+                Text("Personal reverse-engineering project. Not affiliated with or endorsed by the watch manufacturer. Health readings from unsupported third-party devices should not be used for medical decisions.")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 32)
+            }
         )
     }
 

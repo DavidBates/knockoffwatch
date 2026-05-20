@@ -1,8 +1,16 @@
 # knockoffwatch
 
-A reverse-engineered iOS companion app for the **LaxasFit Watch Ultra** (and similar budget BLE smartwatches).
+<p align="center">
+  <img src="knockoffwatch/Assets.xcassets/AppIcon.appiconset/AppIcon1024x1024.png" alt="knockoffwatch app icon" width="200"/>
+</p>
 
-The official app for this watch is abandoned and barely functional. This was built from scratch by reverse-engineering the watch's BLE protocol — enough to pull heart rate, blood pressure, and blood oxygen readings and sync them to Apple Health.
+A reverse-engineered iOS companion app for the **LaxasFit Watch Ultra** (and possibly similar budget BLE smartwatches).
+
+The official app for this watch is barely functional. This was built from scratch by reverse-engineering the watch's BLE protocol... enough to pull heart rate, blood pressure, and blood oxygen readings and sync them to Apple Health.
+
+<p align="center">
+  <img src=".media/showcase.gif" alt="knockoffwatch app demo" width="300"/>
+</p>
 
 ---
 
@@ -99,12 +107,6 @@ Full protocol documentation (live status flow, keep-alive, battery reads, packet
 
 ---
 
-## Design
-
-UI design specification and card layout reference are in [`.design/`](.design/).
-
----
-
 ## Disclaimer
 
-Personal reverse-engineering project. Not affiliated with or endorsed by the watch manufacturer. Health readings from unsupported third-party devices should not be used for medical decisions.
+Personal reverse-engineering project. Not affiliated with or endorsed by the watch manufacturer. Health readings from unsupported third-party devices should not be used for medical decisions. 
