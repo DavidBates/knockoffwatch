@@ -118,7 +118,7 @@ struct HomeView: View {
                 .font(.headline)
             Spacer()
             if let last = latestHealthDate {
-                (Text("Updated ") + Text(last, style: .relative) + Text(" ago"))
+                Text("Updated \(last, style: .relative) ago")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
@@ -200,7 +200,7 @@ struct HomeView: View {
                 Spacer()
 
                 if let last = bluetooth.lastSyncTime {
-                    (Text("Last: ") + Text(last, style: .relative))
+                    Text("Last: \(last, style: .relative)")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
