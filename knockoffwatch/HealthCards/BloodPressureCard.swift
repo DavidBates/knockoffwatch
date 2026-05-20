@@ -39,7 +39,8 @@ struct BloodPressureCard: View {
                 BloodPressureHeroVisual(
                     sys: isActive ? nil : pair.latest?.systolic.map { "\($0)" },
                     dia: isActive ? nil : pair.latest?.diastolic.map { "\($0)" },
-                    isMeasuring: isActive
+                    isMeasuring: isActive,
+                    latestHR: bluetooth.lastHeartRate
                 )
             },
             chart: {

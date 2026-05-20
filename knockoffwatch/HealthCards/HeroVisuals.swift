@@ -43,11 +43,79 @@ struct HeartRateHeroVisual: View {
 
 // MARK: - Blood Pressure Hero
 
+private struct ECGLineView: View {
+    let beatDuration: Double
+
+    // Normalized (x, y) control points for one P-QRS-T heartbeat cycle.
+    // y=0 is top, y=1 is bottom; baseline sits at y≈0.55.
+    private let ecgPoints: [(CGFloat, CGFloat)] = [
+        (0.00, 0.55), (0.12, 0.55),
+        (0.18, 0.46), (0.23, 0.55),   // P wave
+        (0.30, 0.55), (0.37, 0.55),
+        (0.40, 0.10),                   // R spike
+        (0.43, 0.72),                   // S dip
+        (0.49, 0.42), (0.56, 0.55),    // T wave
+        (0.76, 0.55), (1.00, 0.55),
+    ]
+
+    var body: some View {
+        TimelineView(.animation) { timeline in
+            Canvas { ctx, size in
+                let t = timeline.date.timeIntervalSinceReferenceDate
+                let phase = CGFloat((t / beatDuration).truncatingRemainder(dividingBy: 1.0))
+                let pts = ecgPoints.map { CGPoint(x: $0.0 * size.width, y: $0.1 * size.height) }
+                drawECG(ctx: ctx, phase: phase, pts: pts)
+            }
+        }
+    }
+
+    private func drawECG(ctx: GraphicsContext, phase: CGFloat, pts: [CGPoint]) {
+        // Faint static trace
+        var fullPath = Path()
+        fullPath.move(to: pts[0])
+        pts.dropFirst().forEach { fullPath.addLine(to: $0) }
+        ctx.stroke(fullPath, with: .color(.orange.opacity(0.18)), lineWidth: 1.5)
+
+        // Lit trail: last 20% of path behind the dot
+        let trailLen: CGFloat = 0.20
+        let trailStart = max(0.0, phase - trailLen)
+        var trailPath = Path()
+        for i in 0...18 {
+            let p = trailStart + (phase - trailStart) * CGFloat(i) / 18.0
+            let pt = pointOnPath(pts: pts, phase: p)
+            if i == 0 { trailPath.move(to: pt) } else { trailPath.addLine(to: pt) }
+        }
+        ctx.stroke(trailPath, with: .color(.orange.opacity(0.90)), lineWidth: 2.0)
+
+        // Glowing dot
+        let center = pointOnPath(pts: pts, phase: phase)
+        ctx.fill(Path(ellipseIn: CGRect(x: center.x - 5, y: center.y - 5, width: 10, height: 10)),
+                 with: .color(.orange.opacity(0.28)))
+        ctx.fill(Path(ellipseIn: CGRect(x: center.x - 3, y: center.y - 3, width: 6, height: 6)),
+                 with: .color(.orange))
+    }
+
+    private func pointOnPath(pts: [CGPoint], phase: CGFloat) -> CGPoint {
+        let total = CGFloat(pts.count - 1)
+        let raw = min(phase * total, total)
+        let idx = Int(raw)
+        let t = raw - CGFloat(idx)
+        guard idx < pts.count - 1 else { return pts.last! }
+        let a = pts[idx], b = pts[idx + 1]
+        return CGPoint(x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t)
+    }
+}
+
 struct BloodPressureHeroVisual: View {
     let sys: String?
     let dia: String?
     let isMeasuring: Bool
-    @State private var arcTrim: Double = 0.35
+    let latestHR: Int?
+
+    private var beatDuration: Double {
+        guard let hr = latestHR, hr > 30, hr < 220 else { return 60.0 / 75.0 }
+        return 60.0 / Double(hr)
+    }
 
     private var a11yLabel: String {
         if let s = sys, let d = dia { return "\(s) over \(d) millimeters of mercury" }
@@ -55,41 +123,38 @@ struct BloodPressureHeroVisual: View {
     }
 
     var body: some View {
-        ZStack {
-            Circle()
-                .stroke(Color.orange.opacity(0.15), lineWidth: 9)
-            Circle()
-                .trim(from: 0, to: arcTrim)
-                .stroke(Color.orange, style: StrokeStyle(lineWidth: 9, lineCap: .round))
-                .rotationEffect(.degrees(-90))
-            VStack(spacing: 3) {
-                HStack(alignment: .firstTextBaseline, spacing: 2) {
-                    Text(sys ?? "--")
-                        .font(.system(size: 20, weight: .bold, design: .rounded))
-                        .contentTransition(.numericText())
-                        .monospacedDigit()
-                    Text("/")
-                        .font(.system(size: 14, weight: .regular))
-                        .foregroundStyle(.secondary)
-                    Text(dia ?? "--")
-                        .font(.system(size: 16, weight: .bold, design: .rounded))
-                        .contentTransition(.numericText())
-                        .monospacedDigit()
-                }
-                Text("mmHg")
-                    .font(.system(size: 10, weight: .medium))
+        VStack(spacing: 4) {
+            Image(systemName: "stethoscope")
+                .font(.system(size: 42))
+                .foregroundStyle(.orange)
+                .opacity(isMeasuring ? 0.65 : 1.0)
+
+            HStack(alignment: .firstTextBaseline, spacing: 2) {
+                Text(sys ?? "--")
+                    .font(.system(size: 20, weight: .bold, design: .rounded))
+                    .contentTransition(.numericText())
+                    .monospacedDigit()
+                Text("/")
+                    .font(.system(size: 14, weight: .regular))
                     .foregroundStyle(.secondary)
+                Text(dia ?? "--")
+                    .font(.system(size: 16, weight: .bold, design: .rounded))
+                    .contentTransition(.numericText())
+                    .monospacedDigit()
+            }
+
+            Text("mmHg")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(.secondary)
+
+            if isMeasuring {
+                ECGLineView(beatDuration: beatDuration)
+                    .frame(height: 26)
+                    .padding(.top, 2)
             }
         }
-        .frame(width: 126, height: 126)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .accessibilityLabel(a11yLabel)
-        .onChange(of: isMeasuring) { _, active in
-            if active {
-                withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) { arcTrim = 0.80 }
-            } else {
-                withAnimation(.easeOut(duration: 0.4)) { arcTrim = 0.35 }
-            }
-        }
     }
 }
 
@@ -137,7 +202,7 @@ struct BloodOxygenHeroVisual: View {
     HStack(spacing: 0) {
         HeartRateHeroVisual(bpm: "72", isMeasuring: false)
             .frame(width: 140, height: 140)
-        BloodPressureHeroVisual(sys: "118", dia: "76", isMeasuring: false)
+        BloodPressureHeroVisual(sys: "118", dia: "76", isMeasuring: false, latestHR: 72)
             .frame(width: 140, height: 140)
         BloodOxygenHeroVisual(pct: "98", isMeasuring: false)
             .frame(width: 140, height: 140)
@@ -150,7 +215,7 @@ struct BloodOxygenHeroVisual: View {
     HStack(spacing: 0) {
         HeartRateHeroVisual(bpm: nil, isMeasuring: true)
             .frame(width: 140, height: 140)
-        BloodPressureHeroVisual(sys: nil, dia: nil, isMeasuring: true)
+        BloodPressureHeroVisual(sys: nil, dia: nil, isMeasuring: true, latestHR: 72)
             .frame(width: 140, height: 140)
         BloodOxygenHeroVisual(pct: nil, isMeasuring: true)
             .frame(width: 140, height: 140)
