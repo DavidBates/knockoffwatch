@@ -6,6 +6,11 @@ struct knockoffwatchApp: App {
     @State private var bluetooth = BluetoothManager()
 
     init() {
+        #if DEBUG
+        if CommandLine.arguments.contains("-UIResetOnboarding") {
+            UserDefaults.standard.removeObject(forKey: "hasCompletedOnboarding")
+        }
+        #endif
         BGTaskScheduler.shared.register(
             forTaskWithIdentifier: BluetoothManager.bgSyncTaskIdentifier,
             using: nil

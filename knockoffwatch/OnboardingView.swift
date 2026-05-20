@@ -309,6 +309,7 @@ struct OnboardingPageView: View {
                     .foregroundStyle(buttonForeground)
                     .clipShape(RoundedRectangle(cornerRadius: 14))
             }
+            .accessibilityIdentifier("onboarding.continueButton")
             .padding(.horizontal, 32)
             .padding(.bottom, 80)
         }

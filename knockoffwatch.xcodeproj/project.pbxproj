@@ -6,7 +6,26 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXContainerItemProxy section */
+		AADDF31000000009AADDF310 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = C63635E12FB2D7FA00A887A9 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = C63635E82FB2D7FA00A887A9;
+			remoteInfo = knockoffwatch;
+		};
+		BBDDF31000000009BBDDF310 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = C63635E12FB2D7FA00A887A9 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = C63635E82FB2D7FA00A887A9;
+			remoteInfo = knockoffwatch;
+		};
+/* End PBXContainerItemProxy section */
+
 /* Begin PBXFileReference section */
+		AADDF31000000001AADDF310 /* knockoffwatchTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = knockoffwatchTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		BBDDF31000000001BBDDF310 /* knockoffwatchUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = knockoffwatchUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		C63635E92FB2D7FA00A887A9 /* knockoffwatch.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = knockoffwatch.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -22,6 +41,16 @@
 /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
+		AADDF31000000002AADDF310 /* knockoffwatchTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = knockoffwatchTests;
+			sourceTree = "<group>";
+		};
+		BBDDF31000000002BBDDF310 /* knockoffwatchUITests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = knockoffwatchUITests;
+			sourceTree = "<group>";
+		};
 		C63635EB2FB2D7FA00A887A9 /* knockoffwatch */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			exceptions = (
@@ -33,6 +62,20 @@
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
+		AADDF31000000004AADDF310 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		BBDDF31000000004BBDDF310 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		C63635E62FB2D7FA00A887A9 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
@@ -47,6 +90,8 @@
 			isa = PBXGroup;
 			children = (
 				C63635EB2FB2D7FA00A887A9 /* knockoffwatch */,
+				AADDF31000000002AADDF310 /* knockoffwatchTests */,
+				BBDDF31000000002BBDDF310 /* knockoffwatchUITests */,
 				C63635EA2FB2D7FA00A887A9 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -55,6 +100,8 @@
 			isa = PBXGroup;
 			children = (
 				C63635E92FB2D7FA00A887A9 /* knockoffwatch.app */,
+				AADDF31000000001AADDF310 /* knockoffwatchTests.xctest */,
+				BBDDF31000000001BBDDF310 /* knockoffwatchUITests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -62,6 +109,50 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
+		AADDF31000000005AADDF310 /* knockoffwatchTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = AADDF31000000008AADDF310 /* Build configuration list for PBXNativeTarget "knockoffwatchTests" */;
+			buildPhases = (
+				AADDF31000000003AADDF310 /* Sources */,
+				AADDF31000000004AADDF310 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				AADDF3100000000AAADDF310 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				AADDF31000000002AADDF310 /* knockoffwatchTests */,
+			);
+			name = knockoffwatchTests;
+			packageProductDependencies = (
+			);
+			productName = knockoffwatchTests;
+			productReference = AADDF31000000001AADDF310 /* knockoffwatchTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		BBDDF31000000005BBDDF310 /* knockoffwatchUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = BBDDF31000000008BBDDF310 /* Build configuration list for PBXNativeTarget "knockoffwatchUITests" */;
+			buildPhases = (
+				BBDDF31000000003BBDDF310 /* Sources */,
+				BBDDF31000000004BBDDF310 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				BBDDF3100000000ABBDDF310 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				BBDDF31000000002BBDDF310 /* knockoffwatchUITests */,
+			);
+			name = knockoffwatchUITests;
+			packageProductDependencies = (
+			);
+			productName = knockoffwatchUITests;
+			productReference = BBDDF31000000001BBDDF310 /* knockoffwatchUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
 		C63635E82FB2D7FA00A887A9 /* knockoffwatch */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = C63635F62FB2D7FB00A887A9 /* Build configuration list for PBXNativeTarget "knockoffwatch" */;
@@ -94,6 +185,14 @@
 				LastSwiftUpdateCheck = 2610;
 				LastUpgradeCheck = 2610;
 				TargetAttributes = {
+					AADDF31000000005AADDF310 = {
+						CreatedOnToolsVersion = 26.1.1;
+						TestTargetID = C63635E82FB2D7FA00A887A9;
+					};
+					BBDDF31000000005BBDDF310 = {
+						CreatedOnToolsVersion = 26.1.1;
+						TestTargetID = C63635E82FB2D7FA00A887A9;
+					};
 					C63635E82FB2D7FA00A887A9 = {
 						CreatedOnToolsVersion = 26.1.1;
 					};
@@ -114,6 +213,8 @@
 			projectRoot = "";
 			targets = (
 				C63635E82FB2D7FA00A887A9 /* knockoffwatch */,
+				AADDF31000000005AADDF310 /* knockoffwatchTests */,
+				BBDDF31000000005BBDDF310 /* knockoffwatchUITests */,
 			);
 		};
 /* End PBXProject section */
@@ -129,6 +230,20 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
+		AADDF31000000003AADDF310 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		BBDDF31000000003BBDDF310 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		C63635E52FB2D7FA00A887A9 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -138,7 +253,86 @@
 		};
 /* End PBXSourcesBuildPhase section */
 
+/* Begin PBXTargetDependency section */
+		AADDF3100000000AAADDF310 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = C63635E82FB2D7FA00A887A9 /* knockoffwatch */;
+			targetProxy = AADDF31000000009AADDF310 /* PBXContainerItemProxy */;
+		};
+		BBDDF3100000000ABBDDF310 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = C63635E82FB2D7FA00A887A9 /* knockoffwatch */;
+			targetProxy = BBDDF31000000009BBDDF310 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
 /* Begin XCBuildConfiguration section */
+		AADDF31000000006AADDF310 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = LARMPUH29Z;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.1;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.magician.watch.knockoffwatch.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/knockoffwatch.app/knockoffwatch";
+			};
+			name = Debug;
+		};
+		AADDF31000000007AADDF310 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = LARMPUH29Z;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.1;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.magician.watch.knockoffwatch.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/knockoffwatch.app/knockoffwatch";
+			};
+			name = Release;
+		};
+		BBDDF31000000006BBDDF310 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = LARMPUH29Z;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.1;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.magician.watch.knockoffwatch.uitests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = knockoffwatch;
+			};
+			name = Debug;
+		};
+		BBDDF31000000007BBDDF310 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = LARMPUH29Z;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.1;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.magician.watch.knockoffwatch.uitests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = knockoffwatch;
+			};
+			name = Release;
+		};
 		C63635F42FB2D7FB00A887A9 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -319,6 +513,24 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
+		AADDF31000000008AADDF310 /* Build configuration list for PBXNativeTarget "knockoffwatchTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				AADDF31000000006AADDF310 /* Debug */,
+				AADDF31000000007AADDF310 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		BBDDF31000000008BBDDF310 /* Build configuration list for PBXNativeTarget "knockoffwatchUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				BBDDF31000000006BBDDF310 /* Debug */,
+				BBDDF31000000007BBDDF310 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 		C63635E42FB2D7FA00A887A9 /* Build configuration list for PBXProject "knockoffwatch" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
