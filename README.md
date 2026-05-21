@@ -109,4 +109,11 @@ Full protocol documentation (live status flow, keep-alive, battery reads, packet
 
 ## Disclaimer
 
-Personal reverse-engineering project. Not affiliated with or endorsed by the watch manufacturer. Health readings from unsupported third-party devices should not be used for medical decisions. 
+Personal reverse-engineering project. Not affiliated with or endorsed by the watch manufacturer. Health readings from unsupported third-party devices should not be used for medical decisions.
+
+---
+
+## Privacy & Support
+
+- [Privacy Policy](PRIVACY.md) — no data collected, everything stays on your device
+- [Support](SUPPORT.md) — bug reports, compatibility notes, common issues
